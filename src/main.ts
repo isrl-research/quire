@@ -5,6 +5,7 @@ import WriteView from "./views/WriteView.vue";
 import WorkbenchView from "./views/WorkbenchView.vue";
 import PdfView from "./views/PdfView.vue";
 import "./assets/style.css";
+import "./assets/editor.css";
 
 const router = createRouter({
   history: createWebHashHistory(),

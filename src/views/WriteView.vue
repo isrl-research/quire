@@ -1,100 +1,125 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
+import { useEditor, EditorContent } from '@tiptap/vue-3'
+import StarterKit from '@tiptap/starter-kit'
+import { CitationNode } from '../extensions/CitationNode'
+import { emitter } from '../events'
+import { useDocument, type BibEntry } from '../composables/useDocument'
 
 const router = useRouter()
+const { docTitle, docAuthors, citations, isDirty } = useDocument()
 
-interface Citation {
-  id: number
-  title: string
-  authors: string
-  year: string
-  journal: string
-  doi: string
-  abstract: string
-  yourNotes: string
-}
+// ── Editor ────────────────────────────────────────────────────────────────────
 
-const citations: Citation[] = [
-  {
-    id: 1,
-    title: 'Allergen Labelling Compliance in Food Manufacturing: A Systematic Review',
-    authors: 'Popova, M., Chen, L., & Okafor, R.',
-    year: '2022',
-    journal: 'Food Control',
-    doi: '10.1016/j.foodcont.2022.108940',
-    abstract: 'A systematic review examining allergen labelling compliance across 14 countries. Of 847 products sampled, 34% showed discrepancies between declared allergens and actual ingredient lists, with peanut and tree nut labelling showing the highest non-compliance rates. The study identifies inconsistent definition of precautionary labelling as a primary driver of consumer confusion.',
-    yourNotes: 'Key stat for RQ2 — cross-check with FSSAI thresholds. The 34% figure is pre-pandemic; useful as baseline. Check methodology section for sampling frame before citing directly.',
+const INITIAL_CONTENT = `
+<h2>Abstract</h2>
+<p>The inadequate labelling of allergens in packaged foods poses significant public health risks, particularly for the estimated 220–520 million people globally affected by food allergies. This cross-sectional study examines allergen labelling compliance among packaged food manufacturers in India under the Food Safety and Standards (Labelling and Display) Regulations 2020, with comparative reference to EU Regulation 1169/2011 and the US FALCPA. We find systematic gaps in precautionary labelling practice and identify regulatory interpretation as a primary source of non-compliance.</p>
+<h2>1. Introduction</h2>
+<p>Food allergy affects an estimated 1 in 8 consumers <span data-cite-key="fda2021" data-index="2"></span> in developed markets, with rising prevalence documented across South Asian populations. Despite regulatory frameworks mandating allergen disclosure, recent systematic reviews indicate that approximately 34% of packaged food products <span data-cite-key="popova2022" data-index="1"></span> show discrepancies between declared allergen content and actual ingredient composition.</p>
+<p>In the Indian context, the FSSAI has established a threshold of 10 mg/kg for individual allergen declarations under §4.2.1 of the 2020 labelling regulations <span data-cite-key="hadley2019" data-index="3"></span> yet enforcement mechanisms remain inconsistently applied across food category segments.</p>
+<p>The foundational challenge is not merely one of regulatory compliance, but of communication design: precautionary allergen labels such as "may contain" are routinely misinterpreted by consumers, <span data-cite-key="hadley2019" data-index="3"></span> undermining their protective function even where they are accurately applied.</p>
+<h2>2. Literature Review</h2>
+<p>The landscape of allergen labelling research is characterised by a tension between regulatory prescription and real-world consumer behaviour. Foundational work by Hadley &amp; King (2019) <span data-cite-key="hadley2019" data-index="3"></span> established baseline comprehension rates for precautionary labelling across demographically stratified cohorts, finding that education level and prior allergy diagnosis are the primary moderators of label interpretation accuracy.</p>
+<p>Subsequent systematic review of manufacturing-side compliance by Popova et al. (2022) <span data-cite-key="popova2022" data-index="1"></span> extended this analysis to the supply chain, demonstrating that discrepancies originate as frequently in ingredient sourcing and cross-contact risk management as in the labelling design itself.</p>
+<h2>3. Methods</h2>
+<p>Cross-sectional analysis of n=340 SKUs sampled from organised retail in three Indian metro markets (Chennai, Pune, Hyderabad). Audit conducted against FSSAI 2020 labelling regulations with comparative coding against EU and US frameworks. Inter-rater reliability: κ = 0.87. [Draft continues…]</p>
+`
+
+const editor = useEditor({
+  extensions: [
+    StarterKit.configure({
+      heading: { levels: [2, 3] },
+      horizontalRule: false,
+      codeBlock: false,
+      code: false,
+    }),
+    CitationNode,
+  ],
+  content: INITIAL_CONTENT,
+  onUpdate() {
+    isDirty.value = true
   },
-  {
-    id: 2,
-    title: 'Food Allergen Labeling and Consumer Protection Act: Compliance Report 2021',
-    authors: 'U.S. Food and Drug Administration',
-    year: '2021',
-    journal: 'FDA Technical Report',
-    doi: 'FDA-TR-2021-0042',
-    abstract: 'Annual compliance report on FALCPA implementation, documenting a 1-in-8 consumer experience with allergic reactions attributable to labelling failures in packaged foods over a 24-month surveillance period. Survey conducted across n=12,400 households with at least one member reporting a food allergy.',
-    yourNotes: 'The 1-in-8 statistic is from their consumer survey (n=12,400), not clinical data. Worth footnoting. Good for introduction to establish scale of the problem.',
-  },
-  {
-    id: 3,
-    title: 'Hidden Allergens and Precautionary Labelling: Consumer Understanding and Risk',
-    authors: 'Hadley, C. & King, J.',
-    year: '2019',
-    journal: 'J Allergy Clin Immunol',
-    doi: '10.1016/j.jaci.2018.11.025',
-    abstract: 'Cross-sectional study of consumer comprehension of precautionary allergen labels (PAL) across a 2019 baseline cohort. Finds significant variation in PAL interpretation by education level and prior allergy diagnosis. 67% of respondents misinterpreted "may contain" as indicating lower risk than a direct ingredient declaration.',
-    yourNotes: 'Foundational paper for our literature review section. The "may contain" framing discussion is directly applicable to our FSSAI policy recommendations.',
-  },
-]
+})
+
+// ── Tooltip state ─────────────────────────────────────────────────────────────
 
 const tooltipVisible = ref(false)
-const tooltipCitation = ref<Citation | null>(null)
+const tooltipCitation = ref<BibEntry | null>(null)
 const tooltipStyle = ref({ left: '0px', top: '0px' })
-
-const panelOpen = ref(false)
-const activeCitation = ref<Citation | null>(null)
-
+const tooltipHovered = ref(false)
 let hideTimer: ReturnType<typeof setTimeout> | null = null
 
-function showTooltip(e: MouseEvent, id: number) {
-  if (panelOpen.value) return
-  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null }
-  const el = e.currentTarget as HTMLElement
-  const rect = el.getBoundingClientRect()
-  tooltipStyle.value = {
-    left: `${rect.left + rect.width / 2}px`,
-    top: `${rect.bottom + 10}px`,
-  }
-  tooltipCitation.value = citations.find(c => c.id === id) ?? null
-  tooltipVisible.value = true
+function findCitation(key: string) {
+  return citations.value.find(c => c.key === key) ?? null
 }
 
-function startHideTooltip() {
+function startHide() {
   hideTimer = setTimeout(() => {
+    if (!tooltipHovered.value) {
+      tooltipVisible.value = false
+      tooltipCitation.value = null
+    }
+  }, 200)
+}
+
+function cancelHide() {
+  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null }
+}
+
+// ── Citation panel state ──────────────────────────────────────────────────────
+
+const panelOpen = ref(false)
+const activeCitation = ref<BibEntry | null>(null)
+
+// ── Event wiring ──────────────────────────────────────────────────────────────
+
+onMounted(() => {
+  emitter.on('cite:hover', ({ key, rect }) => {
+    if (panelOpen.value) return
+    cancelHide()
+    const cite = findCitation(key)
+    if (!cite) return
+    tooltipStyle.value = {
+      left: `${rect.left + rect.width / 2}px`,
+      top: `${rect.bottom + 10}px`,
+    }
+    tooltipCitation.value = cite
+    tooltipVisible.value = true
+  })
+
+  emitter.on('cite:leave', () => {
+    startHide()
+  })
+
+  emitter.on('cite:click', ({ key }) => {
+    cancelHide()
     tooltipVisible.value = false
-    tooltipCitation.value = null
-  }, 180)
-}
+    const cite = findCitation(key)
+    if (!cite) return
+    activeCitation.value = cite
+    panelOpen.value = true
+  })
+})
 
-function cancelHideTooltip() {
-  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null }
-}
-
-function openPanel(id: number) {
-  tooltipVisible.value = false
-  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null }
-  activeCitation.value = citations.find(c => c.id === id) ?? null
-  panelOpen.value = true
-}
-
-function openTooltipCitation() {
-  if (tooltipCitation.value) openPanel(tooltipCitation.value.id)
-}
+onBeforeUnmount(() => {
+  emitter.off('cite:hover')
+  emitter.off('cite:leave')
+  emitter.off('cite:click')
+  editor.value?.destroy()
+  if (hideTimer) clearTimeout(hideTimer)
+})
 
 function closePanel() {
   panelOpen.value = false
   setTimeout(() => { activeCitation.value = null }, 260)
+}
+
+function openTooltipCitation() {
+  if (!tooltipCitation.value) return
+  activeCitation.value = tooltipCitation.value
+  tooltipVisible.value = false
+  panelOpen.value = true
 }
 
 function goToPdf() {
@@ -104,95 +129,29 @@ function goToPdf() {
 
 <template>
   <div class="write-layout">
-    <!-- Document scrollable area -->
+    <!-- Document scroll area -->
     <div class="document-area">
       <div class="paper">
-        <!-- Paper header -->
+        <!-- Paper header — mirrors placeholder exactly -->
         <div class="paper-eyebrow">Working Draft · April 2026</div>
-        <h1 class="paper-title">Allergen Labelling in Packaged Foods</h1>
+        <h1 class="paper-title">{{ docTitle }}</h1>
         <p class="paper-subtitle">A Cross-Sectional Study of FSSAI Compliance and Consumer Risk Communication</p>
         <div class="paper-byline">
-          <span>Sharma, R.</span>
-          <span class="by-sep">·</span>
-          <span>[Author]</span>
+          <template v-for="(author, i) in docAuthors" :key="i">
+            <span>{{ author }}</span>
+            <span v-if="i < docAuthors.length - 1" class="by-sep">·</span>
+          </template>
           <span class="by-sep">·</span>
           <span>Food Policy Studies, IIT Madras</span>
         </div>
         <div class="paper-rule"></div>
 
-        <!-- Abstract -->
-        <div class="paper-section">
-          <h2 class="section-head">Abstract</h2>
-          <p>The inadequate labelling of allergens in packaged foods poses significant public health risks, particularly for the estimated 220–520 million people globally affected by food allergies. This cross-sectional study examines allergen labelling compliance among packaged food manufacturers in India under the Food Safety and Standards (Labelling and Display) Regulations 2020, with comparative reference to EU Regulation 1169/2011 and the US FALCPA. We find systematic gaps in precautionary labelling practice and identify regulatory interpretation as a primary source of non-compliance.</p>
-        </div>
-
-        <!-- Introduction -->
-        <div class="paper-section">
-          <h2 class="section-head">1. Introduction</h2>
-          <p>Food allergy affects an estimated
-            <span
-              class="cite-inline"
-              @mouseenter="showTooltip($event, 2)"
-              @mouseleave="startHideTooltip"
-              @click="openPanel(2)"
-            >1 in 8 consumers<sup class="cite-sup">[2]</sup></span>
-            in developed markets, with rising prevalence documented across South Asian populations. Despite regulatory frameworks mandating allergen disclosure, recent systematic reviews indicate that approximately
-            <span
-              class="cite-inline"
-              @mouseenter="showTooltip($event, 1)"
-              @mouseleave="startHideTooltip"
-              @click="openPanel(1)"
-            >34% of packaged food products<sup class="cite-sup">[1]</sup></span>
-            show discrepancies between declared allergen content and actual ingredient composition.
-          </p>
-          <p>In the Indian context, the FSSAI has established a threshold of 10 mg/kg for individual allergen declarations under §4.2.1 of the 2020 labelling regulations,<sup
-              class="cite-sup cite-sup-bare"
-              @mouseenter="showTooltip($event, 3)"
-              @mouseleave="startHideTooltip"
-              @click="openPanel(3)"
-            >[3]</sup> yet enforcement mechanisms remain inconsistently applied across food category segments.
-          </p>
-          <p>The foundational challenge is not merely one of regulatory compliance, but of communication design: precautionary allergen labels such as "may contain" are routinely misinterpreted by consumers,<sup
-              class="cite-sup cite-sup-bare"
-              @mouseenter="showTooltip($event, 3)"
-              @mouseleave="startHideTooltip"
-              @click="openPanel(3)"
-            >[3]</sup> undermining their protective function even where they are accurately applied.
-          </p>
-        </div>
-
-        <!-- Literature Review -->
-        <div class="paper-section">
-          <h2 class="section-head">2. Literature Review</h2>
-          <p>The landscape of allergen labelling research is characterised by a tension between regulatory prescription and real-world consumer behaviour. Foundational work by
-            <span
-              class="cite-inline"
-              @mouseenter="showTooltip($event, 3)"
-              @mouseleave="startHideTooltip"
-              @click="openPanel(3)"
-            >Hadley &amp; King (2019)<sup class="cite-sup">[3]</sup></span>
-            established baseline comprehension rates for precautionary labelling across demographically stratified cohorts, finding that education level and prior allergy diagnosis are the primary moderators of label interpretation accuracy.
-          </p>
-          <p>Subsequent systematic review of manufacturing-side compliance by
-            <span
-              class="cite-inline"
-              @mouseenter="showTooltip($event, 1)"
-              @mouseleave="startHideTooltip"
-              @click="openPanel(1)"
-            >Popova et al. (2022)<sup class="cite-sup">[1]</sup></span>
-            extended this analysis to the supply chain, demonstrating that discrepancies originate as frequently in ingredient sourcing and cross-contact risk management as in the labelling design itself. This has significant implications for how regulatory bodies frame compliance obligations.
-          </p>
-        </div>
-
-        <!-- Methods (partial) -->
-        <div class="paper-section">
-          <h2 class="section-head">3. Methods</h2>
-          <p class="text-secondary-col">Cross-sectional analysis of n=340 SKUs sampled from organised retail in three Indian metro markets (Chennai, Pune, Hyderabad). Audit conducted against FSSAI 2020 labelling regulations with comparative coding against EU and US frameworks. Inter-rater reliability: κ = 0.87. [Draft continues…]</p>
-        </div>
+        <!-- Tiptap editor — content starts from Abstract -->
+        <EditorContent :editor="editor" class="editor-body" />
       </div>
     </div>
 
-    <!-- Citation Panel (slide in) -->
+    <!-- Citation panel (slide in) -->
     <Transition name="panel">
       <div class="citation-panel" v-if="panelOpen">
         <div class="cp-header">
@@ -213,11 +172,7 @@ function goToPdf() {
           </div>
           <div class="cp-block">
             <div class="cp-block-label">Abstract</div>
-            <p class="cp-abstract">{{ activeCitation.abstract }}</p>
-          </div>
-          <div class="cp-block cp-notes">
-            <div class="cp-block-label">Your notes</div>
-            <p class="cp-notes-text">{{ activeCitation.yourNotes }}</p>
+            <p class="cp-abstract">{{ activeCitation.abstractText }}</p>
           </div>
           <button class="cp-detail-btn" @click="goToPdf">
             View in Detail
@@ -230,19 +185,19 @@ function goToPdf() {
     </Transition>
   </div>
 
-  <!-- Tooltip (teleported to body so it clears all z-index contexts) -->
+  <!-- Tooltip -->
   <Teleport to="body">
     <div
       class="cite-tooltip"
       v-show="tooltipVisible && tooltipCitation"
       :style="tooltipStyle"
-      @mouseenter="cancelHideTooltip"
-      @mouseleave="startHideTooltip"
+      @mouseenter="tooltipHovered = true; cancelHide()"
+      @mouseleave="tooltipHovered = false; startHide()"
     >
       <template v-if="tooltipCitation">
         <div class="tt-title">{{ tooltipCitation.title }}</div>
         <div class="tt-authors">{{ tooltipCitation.authors }} · {{ tooltipCitation.year }}</div>
-        <div class="tt-excerpt">{{ tooltipCitation.abstract.slice(0, 130) }}…</div>
+        <div class="tt-excerpt">{{ (tooltipCitation.abstractText ?? '').slice(0, 130) }}…</div>
         <button class="tt-cta" @click="openTooltipCitation">View in detail →</button>
       </template>
     </div>
@@ -256,7 +211,6 @@ function goToPdf() {
   overflow: hidden;
 }
 
-/* Document scroll area */
 .document-area {
   flex: 1;
   overflow-y: auto;
@@ -267,7 +221,6 @@ function goToPdf() {
   min-width: 0;
 }
 
-/* The "paper" card */
 .paper {
   width: 100%;
   max-width: 660px;
@@ -326,70 +279,11 @@ function goToPdf() {
   margin-bottom: 28px;
 }
 
-.paper-section {
-  margin-bottom: 28px;
+.editor-body {
+  /* EditorContent fills remaining space; ProseMirror styled in editor.css */
 }
 
-.section-head {
-  font-family: var(--font-ui);
-  font-size: 10.5px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--text-tertiary);
-  margin-bottom: 10px;
-}
-
-.paper-section p {
-  font-family: var(--font-doc);
-  font-size: 15.5px;
-  line-height: 1.8;
-  color: var(--text);
-  margin-bottom: 14px;
-}
-
-.paper-section p:last-child {
-  margin-bottom: 0;
-}
-
-.text-secondary-col {
-  color: var(--text-secondary) !important;
-}
-
-/* Inline citation spans */
-.cite-inline {
-  cursor: pointer;
-  transition: color var(--t);
-}
-
-.cite-inline:hover .cite-sup {
-  background: var(--accent-soft);
-  border-radius: 2px;
-}
-
-.cite-sup {
-  color: var(--accent);
-  font-family: var(--font-ui);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  padding: 0 1.5px;
-  border-radius: 2px;
-  cursor: pointer;
-  transition: background var(--t);
-  vertical-align: super;
-  line-height: 0;
-}
-
-.cite-sup-bare {
-  cursor: pointer;
-}
-.cite-sup-bare:hover {
-  background: var(--accent-soft);
-  border-radius: 2px;
-}
-
-/* Citation Panel */
+/* Citation panel — identical to placeholder */
 .citation-panel {
   width: 336px;
   flex-shrink: 0;
@@ -400,7 +294,7 @@ function goToPdf() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.06);
+  box-shadow: -4px 0 20px rgba(0,0,0,0.06);
 }
 
 .cp-header {
@@ -499,20 +393,6 @@ function goToPdf() {
   color: var(--text-secondary);
 }
 
-.cp-notes {
-  background: rgba(10, 95, 191, 0.05);
-  border-radius: var(--radius);
-  padding: 11px 12px;
-  border: 1px solid rgba(10, 95, 191, 0.1);
-}
-
-.cp-notes-text {
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text);
-  font-style: italic;
-}
-
 .cp-detail-btn {
   display: flex;
   align-items: center;
@@ -532,7 +412,6 @@ function goToPdf() {
 }
 .cp-detail-btn:hover { opacity: 0.86; }
 
-/* Panel Transition */
 .panel-enter-active,
 .panel-leave-active {
   transition: transform var(--t), opacity var(--t);
@@ -544,16 +423,16 @@ function goToPdf() {
 }
 </style>
 
-<!-- Global tooltip styles — not scoped because it's teleported to body -->
+<!-- Tooltip global styles — not scoped, teleported to body -->
 <style>
 .cite-tooltip {
   position: fixed;
   transform: translateX(-50%);
   z-index: 9999;
-  background: rgba(255, 255, 255, 0.97);
+  background: rgba(255,255,255,0.97);
   backdrop-filter: blur(28px);
   -webkit-backdrop-filter: blur(28px);
-  border: 1px solid rgba(0, 0, 0, 0.09);
+  border: 1px solid rgba(0,0,0,0.09);
   border-radius: 10px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06);
   padding: 14px 15px;
@@ -593,10 +472,7 @@ function goToPdf() {
   color: #0A5FBF;
   cursor: pointer;
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-  letter-spacing: -0.01em;
 }
 
-.tt-cta:hover {
-  text-decoration: underline;
-}
+.tt-cta:hover { text-decoration: underline; }
 </style>
