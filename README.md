@@ -12,6 +12,7 @@ Writing a cited paragraph currently means switching between your editor, a PDF r
 
 - **WYSIWYG `.qmd` editor** — ProseMirror via Tiptap, Georgia body type, section headings rendered inline
 - **Inline citations** — `[1]` `[2]` superscripts backed by real `.bib` keys; hover for a quick card, click to open a full side panel
+- **`@` citation autocomplete** — type `@` anywhere in the editor to get an Overleaf-style dropdown of your bibliography; filter by key, title, or author with ↑↓ to navigate and Enter/click to insert
 - **Unresolved citation indicator** — any `citeKey` with no matching entry in the `.bib` renders as orange `[?]` with a tooltip naming the missing key
 - **Global bibliography** — `~/.quire/references.bib` is the single source of truth across all projects; seeded with sample entries on first run
 - **Hamburger menu** — `≡` in the title bar opens a quick-access panel with New Document, Open File, and a Recent Files list with relative timestamps
@@ -32,6 +33,7 @@ Writing a cited paragraph currently means switching between your editor, a PDF r
 | File dialogs | tauri-plugin-dialog |
 | Shell execution | tauri-plugin-shell |
 | Home dir (Rust) | dirs 5 |
+| Citation autocomplete | @tiptap/suggestion |
 
 ## Getting started
 

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useEditor, EditorContent } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { CitationNode } from '../extensions/CitationNode'
+import { CitationSuggest } from '../extensions/CitationSuggest'
 import { emitter } from '../events'
 import { useDocument, type BibEntry } from '../composables/useDocument'
 import { useFileOps } from '../composables/useFileOps'
@@ -37,6 +38,7 @@ const editor = useEditor({
       code: false,
     }),
     CitationNode,
+    CitationSuggest,
   ],
   content: INITIAL_CONTENT,
   onUpdate() {
