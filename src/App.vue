@@ -4,19 +4,33 @@ import { useRoute } from 'vue-router'
 import TitleBar from './components/TitleBar.vue'
 import Sidebar from './components/Sidebar.vue'
 import StatusBar from './components/StatusBar.vue'
+import { useDocument } from './composables/useDocument'
 
 const route = useRoute()
+const { docTitle, isDirty } = useDocument()
 
 const titleConfig = computed(() => {
   switch (route.name) {
     case 'write':
-      return { title: 'Allergen Labelling Study', subtitle: 'Write', exportLabel: 'Export as PDF' }
+      return {
+        title: docTitle.value,
+        subtitle: 'Write',
+        exportLabel: 'Export as PDF',
+      }
     case 'workbench':
-      return { title: 'Workbench', subtitle: 'Allergen Labelling Study', exportLabel: null }
+      return {
+        title: 'Workbench',
+        subtitle: docTitle.value,
+        exportLabel: null,
+      }
     case 'pdf':
-      return { title: 'Popova et al. 2022', subtitle: 'PDF Viewer', exportLabel: 'Export as .bib' }
+      return {
+        title: 'Popova et al. 2022',
+        subtitle: 'PDF Viewer',
+        exportLabel: 'Export as .bib',
+      }
     default:
-      return { title: 'IRE', subtitle: '', exportLabel: null }
+      return { title: 'Quire', subtitle: '', exportLabel: null }
   }
 })
 </script>
@@ -27,6 +41,7 @@ const titleConfig = computed(() => {
       :title="titleConfig.title"
       :subtitle="titleConfig.subtitle"
       :export-label="titleConfig.exportLabel"
+      :is-dirty="isDirty"
     />
     <div class="app-body">
       <Sidebar />

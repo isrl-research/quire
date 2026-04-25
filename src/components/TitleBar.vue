@@ -3,6 +3,7 @@ interface Props {
   title: string
   subtitle: string
   exportLabel?: string | null
+  isDirty?: boolean
   onExport?: () => void
 }
 defineProps<Props>()
@@ -17,6 +18,7 @@ defineProps<Props>()
     </div>
 
     <div class="title-center">
+      <span v-if="isDirty" class="dirty-dot" title="Unsaved changes">●</span>
       <span class="doc-title">{{ title }}</span>
       <span v-if="subtitle" class="sep">—</span>
       <span v-if="subtitle" class="doc-subtitle">{{ subtitle }}</span>
@@ -75,6 +77,13 @@ defineProps<Props>()
   overflow: hidden;
 }
 
+.dirty-dot {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  line-height: 1;
+  flex-shrink: 0;
+}
+
 .doc-title {
   font-weight: 600;
   color: var(--text);
@@ -116,11 +125,11 @@ defineProps<Props>()
   letter-spacing: -0.01em;
 }
 .export-btn:hover {
-  background: rgba(0, 0, 0, 0.07);
-  border-color: rgba(0, 0, 0, 0.18);
+  background: rgba(0,0,0,0.07);
+  border-color: rgba(0,0,0,0.18);
   box-shadow: var(--shadow-xs);
 }
 .export-btn:active {
-  background: rgba(0, 0, 0, 0.1);
+  background: rgba(0,0,0,0.1);
 }
 </style>

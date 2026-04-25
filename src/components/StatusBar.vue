@@ -1,3 +1,20 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import { useDocument } from '../composables/useDocument'
+
+const { lastSaved, isDirty } = useDocument()
+
+const savedLabel = computed(() => {
+  if (isDirty.value) return 'Unsaved'
+  if (!lastSaved.value) return 'Saved'
+  const diff = Math.floor((Date.now() - lastSaved.value.getTime()) / 1000)
+  if (diff < 5) return 'Saved just now'
+  if (diff < 60) return `Saved ${diff}s ago`
+  const mins = Math.floor(diff / 60)
+  return `Saved ${mins}m ago`
+})
+</script>
+
 <template>
   <footer class="statusbar">
     <div class="status-left">
@@ -12,7 +29,7 @@
       </span>
     </div>
     <div class="status-right">
-      <span class="stat-item">Saved 2m ago</span>
+      <span class="stat-item" :class="{ unsaved: isDirty }">{{ savedLabel }}</span>
     </div>
   </footer>
 </template>
@@ -41,6 +58,10 @@
   font-size: 10.5px;
   color: var(--text-tertiary);
   letter-spacing: -0.005em;
+}
+
+.stat-item.unsaved {
+  color: var(--accent-orange);
 }
 
 .stat-sep {
