@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -34,12 +34,156 @@ pub struct FrontmatterFields {
     pub date: Option<String>,
 }
 
-// ── Commands ──────────────────────────────────────────────────────────────────
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RecentFile {
+    pub path: String,
+    pub title: String,
+    pub last_opened: String,
+}
+
+// ── Quire home directory ──────────────────────────────────────────────────────
+
+fn quire_home() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".quire")
+}
+
+fn global_bib_path() -> PathBuf {
+    quire_home().join("references.bib")
+}
+
+fn recent_json_path() -> PathBuf {
+    quire_home().join("recent.json")
+}
+
+const DEFAULT_BIB: &str = r#"% Quire global bibliography — ~/.quire/references.bib
+% Add your sources here. All Quire documents share this file.
+
+@article{popova2022,
+  title     = {Allergen Labelling Compliance in Food Manufacturing: A Systematic Review},
+  author    = {Popova, M. and Chen, L. and Okafor, R.},
+  year      = {2022},
+  journal   = {Food Control},
+  volume    = {134},
+  doi       = {10.1016/j.foodcont.2022.108940},
+  abstract  = {A systematic review examining allergen labelling compliance across 14 countries. Of 847 products sampled, 34% showed discrepancies between declared allergens and actual ingredient lists, with peanut and tree nut labelling showing the highest non-compliance rates. The study identifies inconsistent definition of precautionary labelling as a primary driver of consumer confusion.}
+}
+
+@techreport{fda2021,
+  title       = {Food Allergen Labeling and Consumer Protection Act: Compliance Report 2021},
+  author      = {{U.S. Food and Drug Administration}},
+  year        = {2021},
+  institution = {FDA},
+  number      = {FDA-TR-2021-0042},
+  abstract    = {Annual compliance report on FALCPA implementation, documenting a 1-in-8 consumer experience with allergic reactions attributable to labelling failures in packaged foods over a 24-month surveillance period. Survey conducted across n=12,400 households with at least one member reporting a food allergy.}
+}
+
+@article{hadley2019,
+  title    = {Hidden Allergens and Precautionary Labelling: Consumer Understanding and Risk},
+  author   = {Hadley, C. and King, J.},
+  year     = {2019},
+  journal  = {Journal of Allergy and Clinical Immunology},
+  volume   = {143},
+  number   = {3},
+  doi      = {10.1016/j.jaci.2018.11.025},
+  abstract = {Cross-sectional study of consumer comprehension of precautionary allergen labels (PAL) across a 2019 baseline cohort. Finds significant variation in PAL interpretation by education level and prior allergy diagnosis. 67% of respondents misinterpreted "may contain" as indicating lower risk than a direct ingredient declaration.}
+}
+
+@techreport{fssai2023,
+  title       = {Food Safety and Standards (Labelling and Display) Regulations 2020: Implementation Guidelines},
+  author      = {{Food Safety and Standards Authority of India}},
+  year        = {2023},
+  institution = {FSSAI},
+  abstract    = {Implementation guidelines for the 2020 labelling regulations, including threshold specifications for allergen declarations under Section 4.2.1 (10 mg/kg per individual allergen).}
+}
+"#;
+
+fn setup_quire_dir() {
+    let dir = quire_home();
+    if !dir.exists() {
+        fs::create_dir_all(&dir).ok();
+    }
+
+    let bib = global_bib_path();
+    if !bib.exists() {
+        fs::write(&bib, DEFAULT_BIB).ok();
+    }
+
+    let recent = recent_json_path();
+    if !recent.exists() {
+        fs::write(&recent, "[]").ok();
+    }
+}
+
+// ── Quire dir commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn open_document(
-    app: tauri::AppHandle,
-) -> Result<OpenResult, String> {
+fn get_quire_dir() -> String {
+    quire_home().to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn get_global_bib() -> Result<Vec<BibEntry>, String> {
+    let content = fs::read_to_string(global_bib_path()).map_err(|e| e.to_string())?;
+    Ok(parse_bib(&content))
+}
+
+#[tauri::command]
+fn get_global_bib_raw() -> Result<String, String> {
+    fs::read_to_string(global_bib_path()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_global_bib(content: String) -> Result<(), String> {
+    fs::write(global_bib_path(), content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_recent_files() -> Result<Vec<RecentFile>, String> {
+    let content = fs::read_to_string(recent_json_path()).unwrap_or_else(|_| "[]".to_string());
+    serde_json::from_str(&content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_recent_file(path: String, title: String) -> Result<(), String> {
+    let content = fs::read_to_string(recent_json_path()).unwrap_or_else(|_| "[]".to_string());
+    let mut recent: Vec<RecentFile> = serde_json::from_str(&content).unwrap_or_default();
+
+    // Remove existing entry for this path, then prepend fresh entry
+    recent.retain(|r| r.path != path);
+    recent.insert(
+        0,
+        RecentFile {
+            path,
+            title,
+            last_opened: chrono_now(),
+        },
+    );
+
+    // Keep only the 15 most recent
+    recent.truncate(15);
+
+    let serialized = serde_json::to_string_pretty(&recent).map_err(|e| e.to_string())?;
+    fs::write(recent_json_path(), serialized).map_err(|e| e.to_string())
+}
+
+fn chrono_now() -> String {
+    // Simple ISO-8601 without pulling in chrono crate
+    // Uses SystemTime which is available in std
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // Format as seconds since epoch — frontend converts to human label
+    secs.to_string()
+}
+
+// ── Document commands ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn open_document(app: tauri::AppHandle) -> Result<OpenResult, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let path = app
@@ -60,10 +204,17 @@ async fn open_document(
 
     Ok(OpenResult {
         path: path_str,
-        content: content.clone(),
+        content,
         frontmatter,
         body,
     })
+}
+
+#[tauri::command]
+async fn open_document_path(path: String) -> Result<OpenResult, String> {
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let (frontmatter, body) = split_frontmatter(&content);
+    Ok(OpenResult { path, content, frontmatter, body })
 }
 
 #[tauri::command]
@@ -72,10 +223,7 @@ async fn save_document(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn save_document_as(
-    app: tauri::AppHandle,
-    content: String,
-) -> Result<String, String> {
+async fn save_document_as(app: tauri::AppHandle, content: String) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let path = app
@@ -107,7 +255,6 @@ async fn find_bib_for_document(doc_path: String) -> Result<Option<String>, Strin
     let doc = Path::new(&doc_path);
     let dir = doc.parent().ok_or("Invalid path")?;
 
-    // Common .bib locations relative to the document
     let candidates = [
         doc.with_extension("bib"),
         dir.join("references.bib"),
@@ -121,15 +268,11 @@ async fn find_bib_for_document(doc_path: String) -> Result<Option<String>, Strin
         }
     }
 
-    // Walk up one directory level
     if let Some(parent) = dir.parent() {
-        let up_candidates = [
-            parent.join("references.bib"),
-            parent.join("bibliography.bib"),
-        ];
-        for candidate in &up_candidates {
-            if candidate.exists() {
-                return Ok(Some(candidate.to_string_lossy().to_string()));
+        for name in &["references.bib", "bibliography.bib"] {
+            let p = parent.join(name);
+            if p.exists() {
+                return Ok(Some(p.to_string_lossy().to_string()));
             }
         }
     }
@@ -145,20 +288,17 @@ async fn run_quarto(doc_path: String, format: String) -> Result<String, String> 
         .map_err(|e| format!("Failed to run quarto: {e}. Is Quarto installed and on PATH?"))?;
 
     if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        // Return the expected output path
-        let doc = Path::new(&doc_path);
         let ext = match format.as_str() {
             "pdf" => "pdf",
             "docx" => "docx",
             "html" => "html",
             _ => "pdf",
         };
-        let out_path = doc
+        let out_path = Path::new(&doc_path)
             .with_extension(ext)
             .to_string_lossy()
             .to_string();
-        Ok(format!("{}\nOutput: {}", stdout.trim(), out_path))
+        Ok(format!("Render complete\nOutput: {out_path}"))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("Quarto error:\n{}", stderr.trim()))
@@ -171,22 +311,14 @@ fn split_frontmatter(content: &str) -> (FrontmatterFields, String) {
     if !content.starts_with("---") {
         return (FrontmatterFields::default(), content.to_string());
     }
-
-    // Find closing ---
     let after_open = &content[3..];
-    let close_pos = after_open.find("\n---")
-        .or_else(|| after_open.find("\r\n---"));
-
+    let close_pos = after_open.find("\n---").or_else(|| after_open.find("\r\n---"));
     let Some(pos) = close_pos else {
         return (FrontmatterFields::default(), content.to_string());
     };
-
     let yaml = &after_open[..pos];
-    let body_start = pos + 4; // skip "\n---"
-    let body = after_open[body_start..].trim_start().to_string();
-
-    let fields = parse_frontmatter_fields(yaml);
-    (fields, body)
+    let body = after_open[pos + 4..].trim_start().to_string();
+    (parse_frontmatter_fields(yaml), body)
 }
 
 fn parse_frontmatter_fields(yaml: &str) -> FrontmatterFields {
@@ -197,7 +329,6 @@ fn parse_frontmatter_fields(yaml: &str) -> FrontmatterFields {
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-
         if let Some(rest) = trimmed.strip_prefix("title:") {
             title = Some(clean_yaml_string(rest.trim()));
             in_authors = false;
@@ -208,13 +339,15 @@ fn parse_frontmatter_fields(yaml: &str) -> FrontmatterFields {
             in_authors = false;
         } else if in_authors && trimmed.starts_with('-') {
             let author = trimmed.trim_start_matches('-').trim();
-            // Handle "- name: ..." vs "- Author Name"
-            if let Some(rest) = author.strip_prefix("name:") {
-                authors.push(clean_yaml_string(rest.trim()));
-            } else if !author.is_empty() {
-                authors.push(clean_yaml_string(author));
+            let name = if let Some(rest) = author.strip_prefix("name:") {
+                clean_yaml_string(rest.trim())
+            } else {
+                clean_yaml_string(author)
+            };
+            if !name.is_empty() {
+                authors.push(name);
             }
-        } else if !trimmed.starts_with(' ') && !trimmed.starts_with('-') {
+        } else if !trimmed.starts_with(' ') && !trimmed.starts_with('-') && !trimmed.is_empty() {
             in_authors = false;
         }
     }
@@ -232,7 +365,6 @@ fn parse_bib(content: &str) -> Vec<BibEntry> {
     let mut entries = Vec::new();
     let chars: Vec<char> = content.chars().collect();
     let mut i = 0;
-
     while i < chars.len() {
         if chars[i] == '@' {
             i += 1;
@@ -243,12 +375,10 @@ fn parse_bib(content: &str) -> Vec<BibEntry> {
             i += 1;
         }
     }
-
     entries
 }
 
 fn parse_bib_entry(chars: &[char], i: &mut usize) -> Option<BibEntry> {
-    // Read entry type
     let type_start = *i;
     while *i < chars.len() && chars[*i] != '{' && chars[*i] != '(' {
         *i += 1;
@@ -263,23 +393,20 @@ fn parse_bib_entry(chars: &[char], i: &mut usize) -> Option<BibEntry> {
         skip_bib_block(chars, i);
         return None;
     }
-
     if *i >= chars.len() {
         return None;
     }
-    *i += 1; // skip opening { or (
+    *i += 1;
 
-    // Read citation key
     let key_start = *i;
     while *i < chars.len() && chars[*i] != ',' {
         *i += 1;
     }
     let key: String = chars[key_start..*i].iter().collect::<String>().trim().to_string();
     if *i < chars.len() {
-        *i += 1; // skip comma
+        *i += 1;
     }
 
-    // Read fields until closing }
     let mut fields: HashMap<String, String> = HashMap::new();
     parse_bib_fields(chars, i, &mut fields);
 
@@ -304,38 +431,35 @@ fn parse_bib_entry(chars: &[char], i: &mut usize) -> Option<BibEntry> {
 
 fn parse_bib_fields(chars: &[char], i: &mut usize, fields: &mut HashMap<String, String>) {
     let n = chars.len();
-
     loop {
-        // Skip whitespace and commas
         while *i < n && (chars[*i].is_whitespace() || chars[*i] == ',') {
             *i += 1;
         }
-
         if *i >= n || chars[*i] == '}' || chars[*i] == ')' {
-            if *i < n { *i += 1; }
+            if *i < n {
+                *i += 1;
+            }
             break;
         }
-
-        // Read field name
         let name_start = *i;
         while *i < n && chars[*i] != '=' && chars[*i] != '}' && !chars[*i].is_whitespace() {
             *i += 1;
         }
-        if *i == name_start { break; }
+        if *i == name_start {
+            break;
+        }
         let name: String = chars[name_start..*i]
             .iter()
             .collect::<String>()
             .trim()
             .to_lowercase();
 
-        // Skip whitespace and =
         while *i < n && (chars[*i].is_whitespace() || chars[*i] == '=') {
             *i += 1;
         }
-
-        if *i >= n { break; }
-
-        // Read value
+        if *i >= n {
+            break;
+        }
         let value = match chars[*i] {
             '{' => {
                 *i += 1;
@@ -346,7 +470,6 @@ fn parse_bib_fields(chars: &[char], i: &mut usize, fields: &mut HashMap<String, 
                 read_bib_quoted(chars, i)
             }
             _ => {
-                // Bare value (e.g. year = 2022)
                 let start = *i;
                 while *i < n && chars[*i] != ',' && chars[*i] != '\n' && chars[*i] != '}' {
                     *i += 1;
@@ -354,7 +477,6 @@ fn parse_bib_fields(chars: &[char], i: &mut usize, fields: &mut HashMap<String, 
                 chars[start..*i].iter().collect::<String>().trim().to_string()
             }
         };
-
         if !name.is_empty() {
             fields.insert(name, value);
         }
@@ -366,10 +488,16 @@ fn read_bib_braced(chars: &[char], i: &mut usize) -> String {
     let mut result = String::new();
     while *i < chars.len() {
         match chars[*i] {
-            '{' => { depth += 1; result.push('{'); }
+            '{' => {
+                depth += 1;
+                result.push('{');
+            }
             '}' => {
                 depth -= 1;
-                if depth == 0 { *i += 1; break; }
+                if depth == 0 {
+                    *i += 1;
+                    break;
+                }
                 result.push('}');
             }
             c => result.push(c),
@@ -385,13 +513,19 @@ fn read_bib_quoted(chars: &[char], i: &mut usize) -> String {
         result.push(chars[*i]);
         *i += 1;
     }
-    if *i < chars.len() { *i += 1; }
+    if *i < chars.len() {
+        *i += 1;
+    }
     result
 }
 
 fn skip_bib_block(chars: &[char], i: &mut usize) {
-    while *i < chars.len() && chars[*i] != '{' { *i += 1; }
-    if *i < chars.len() { *i += 1; }
+    while *i < chars.len() && chars[*i] != '{' {
+        *i += 1;
+    }
+    if *i < chars.len() {
+        *i += 1;
+    }
     let mut depth = 1usize;
     while *i < chars.len() && depth > 0 {
         match chars[*i] {
@@ -404,8 +538,8 @@ fn skip_bib_block(chars: &[char], i: &mut usize) {
 }
 
 fn clean_bib_braces(s: &str) -> String {
-    let stripped = s.replace('{', "").replace('}', "");
-    stripped
+    s.replace('{', "")
+        .replace('}', "")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -415,12 +549,23 @@ fn clean_bib_braces(s: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    setup_quire_dir();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
+            // Quire home
+            get_quire_dir,
+            get_global_bib,
+            get_global_bib_raw,
+            save_global_bib,
+            get_recent_files,
+            add_recent_file,
+            // Documents
             open_document,
+            open_document_path,
             save_document,
             save_document_as,
             load_bib,
