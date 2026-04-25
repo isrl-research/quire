@@ -74,6 +74,14 @@
   background: var(--accent-soft);
 }
 
+.cite-sup-unresolved {
+  color: var(--accent-orange, #C45000);
+}
+
+.cite-sup-unresolved:hover {
+  background: rgba(196, 80, 0, 0.08);
+}
+
 /* Tiptap selection */
 .ProseMirror .ProseMirror-selectednode .cite-sup-node {
   background: var(--accent-soft);

@@ -1,8 +1,15 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { nodeViewProps, NodeViewWrapper } from '@tiptap/vue-3'
 import { emitter } from '../events'
+import { useDocument } from '../composables/useDocument'
 
 const props = defineProps(nodeViewProps)
+const { citations } = useDocument()
+
+const resolved = computed(() =>
+  citations.value.some(c => c.key === props.node.attrs.citeKey)
+)
 
 function onMouseEnter(e: MouseEvent) {
   const el = e.currentTarget as HTMLElement
@@ -22,10 +29,11 @@ function onClick() {
 <template>
   <NodeViewWrapper as="span" class="cite-inline-node">
     <sup
-      class="cite-sup-node"
+      :class="['cite-sup-node', { 'cite-sup-unresolved': !resolved }]"
+      :title="!resolved ? `No entry for '${node.attrs.citeKey}' in references.bib` : undefined"
       @mouseenter="onMouseEnter"
       @mouseleave="onMouseLeave"
       @click.stop="onClick"
-    >[{{ node.attrs.displayIndex }}]</sup>
+    >{{ resolved ? `[${node.attrs.displayIndex}]` : '[?]' }}</sup>
   </NodeViewWrapper>
 </template>
