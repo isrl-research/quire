@@ -158,17 +158,53 @@ src-tauri/src/lib.rs           ← All Rust commands. .bib parser, .qmd read/wri
 
 ---
 
+## Known gaps and honest state (assessed after M0)
+
+This section captures an honest audit of what M0 actually delivers versus what it promises. Read before starting M1 work.
+
+### Critical: the .qmd save format is broken
+`useFileOps.ts` saves Tiptap's raw HTML output as the document body. A file saved by Quire is not valid Quarto Markdown — Quarto cannot render it, and it's unreadable in any other editor. **This is the first thing to fix in M1, before anything else.** The fix: add a ProseMirror HTML→Markdown serialiser on save, and a Markdown→Tiptap HTML parser on load. Tiptap's `@tiptap/pm` gives access to the ProseMirror model; a custom serialiser is ~100 lines. The citation node needs a special serialisation rule: `[@citeKey]` in Pandoc citation syntax.
+
+### Citation numbering is static and will become friction
+`displayIndex` is assigned at insertion time and never updated. If a user inserts a citation at the top of the document after already having `[1]`, `[2]`, `[3]` lower down, the numbers don't reorder. For M0 this is tolerable; in real use it becomes a constant annoyance. Fix: on every editor update, traverse the document, collect citation nodes in order, reassign indices by unique key in order of first appearance, update node attrs. This is a ProseMirror transaction-based operation.
+
+### The workbench — the most novel feature — is entirely placeholder
+The workbench is the genuinely differentiated idea: annotation blocks from multiple source PDFs, spatially organised against a draft outline, drag-to-insert into prose. No tool in the researcher's current stack does this. But `WorkbenchView.vue` is 100% hardcoded fake data. Until Zotero's SQLite is being read (M1), Quire's most important feature does not exist. The UI shell is correct; the data layer is missing entirely.
+
+### Quarto export is wired but untested end-to-end
+`run_quarto` exists in `lib.rs` and the export button is wired. It has never been run against a real document. It will also produce garbage output until the .qmd save format is fixed.
+
+### Citation panel is read-only
+You cannot add, edit, or delete `.bib` entries from within Quire. Adding a new reference requires editing `~/.quire/references.bib` externally and relaunching (or triggering a re-load). A minimal in-app "Add entry" form would close this gap; a full editor is probably overkill for M1.
+
+### Missing basic academic editor features
+Tables, figure captions, math/equations (critical for STEM fields), footnotes, and cross-references are all absent. These are Tiptap extensions and are addable incrementally; they are not architectural problems. Prioritise based on the allergen paper's actual content — it used tables and statistics.
+
+### What genuinely works right now
+- `@` autocomplete is immediately useful
+- Citation hover/click panel is better than the Zotero equivalent for in-flow reference checking
+- Global `.bib` design is sound
+- `[?]` unresolved indicator is a good editorial guardrail
+- The file open/save/recent files loop works correctly (modulo the HTML format issue)
+- The aesthetic and shell are production-quality
+
+---
+
 ## What's next (M1 priorities, in order)
 
-1. **Fix the .qmd save format** — currently saves Tiptap's HTML output, which isn't valid `.qmd`. The save pipeline needs to convert Tiptap's HTML to Markdown (using Tiptap's `generateText` or a ProseMirror serialiser), wrap in YAML frontmatter, and write that. The editor should load `.qmd` by parsing the Markdown back to Tiptap HTML on open.
+1. **Fix the .qmd save format** — blocker for everything else. Write a ProseMirror→Markdown serialiser that handles paragraphs, headings, and citation nodes (serialise as `[@citeKey]` in Pandoc syntax). On load, parse Markdown back to Tiptap HTML. See "Known gaps" section above for detail.
 
-2. **Zotero annotation import** — Zotero stores PDF annotations in `~/Zotero/zotero.sqlite`. Read highlighted text + page number + source paper per highlight, surface them as workbench blocks. No API required — just SQLite reads.
+2. **Dynamic citation index recomputation** — on every editor transaction, traverse document, collect citations in order of appearance, reassign `displayIndex` by unique key. Prevents numbering drift as the user writes.
 
-3. **Real Workbench** — replace the placeholder `WorkbenchView.vue` with actual annotation blocks sourced from (2). Drag-to-draft: dragging a block into the editor inserts a blockquote with the cite-key attached.
+3. **Quarto export end-to-end test** — once the save format is fixed, run `run_quarto` against a real `.qmd` and verify the PDF output is correct. Fix any issues in the Rust command.
 
-4. **Quarto export test** — verify the `run_quarto` Rust command actually works end-to-end with a real `.qmd` file. The command exists; it has not been tested against a real document.
+4. **Zotero annotation import** — read `~/Zotero/zotero.sqlite` (no API, no auth). Extract: highlighted text, page number, colour, source paper (match to `.bib` key). Surface as workbench blocks.
 
-5. **Auto-save** — save every 60s if dirty, not just on Ctrl+S.
+5. **Real Workbench** — replace placeholder `WorkbenchView.vue` with annotation blocks from (4). Drag-to-draft inserts a blockquote with the cite-key attached.
+
+6. **Auto-save** — save every 60s if dirty.
+
+7. **Minimal in-app bib entry form** — a simple "Add reference" sheet (title, authors, year, key, journal, DOI) that appends to `~/.quire/references.bib`. Removes the need to edit the file externally.
 
 ---
 
