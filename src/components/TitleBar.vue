@@ -7,6 +7,7 @@ interface Props {
   onExport?: () => void
 }
 defineProps<Props>()
+const emit = defineEmits<{ toggleMenu: [] }>()
 </script>
 
 <template>
@@ -15,6 +16,13 @@ defineProps<Props>()
       <span class="dot red"></span>
       <span class="dot yellow"></span>
       <span class="dot green"></span>
+      <button class="hamburger" @click="emit('toggleMenu')" title="Menu">
+        <svg width="13" height="11" viewBox="0 0 13 11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <line x1="0" y1="1.5" x2="13" y2="1.5"/>
+          <line x1="0" y1="5.5" x2="13" y2="5.5"/>
+          <line x1="0" y1="9.5" x2="13" y2="9.5"/>
+        </svg>
+      </button>
     </div>
 
     <div class="title-center">
@@ -51,8 +59,27 @@ defineProps<Props>()
   display: flex;
   gap: 6px;
   align-items: center;
-  width: 56px;
+  width: 88px;
   flex-shrink: 0;
+}
+
+.hamburger {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  transition: background var(--t), color var(--t);
+  margin-left: 2px;
+}
+.hamburger:hover {
+  background: var(--bg-chrome-active);
+  color: var(--text-secondary);
 }
 
 .dot {

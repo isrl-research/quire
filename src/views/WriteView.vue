@@ -99,6 +99,14 @@ async function handleKeydown(e: KeyboardEvent) {
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
 
+  // Load content when a file is opened from the hamburger menu or file ops
+  emitter.on('doc:opened', ({ content }) => {
+    if (editor.value && content) {
+      editor.value.commands.setContent(content)
+      isDirty.value = false
+    }
+  })
+
   emitter.on('cite:hover', ({ key, rect }) => {
     if (panelOpen.value) return
     cancelHide()
@@ -128,6 +136,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
+  emitter.off('doc:opened')
   emitter.off('cite:hover')
   emitter.off('cite:leave')
   emitter.off('cite:click')
