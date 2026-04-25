@@ -6,9 +6,11 @@ import StarterKit from '@tiptap/starter-kit'
 import { CitationNode } from '../extensions/CitationNode'
 import { emitter } from '../events'
 import { useDocument, type BibEntry } from '../composables/useDocument'
+import { useFileOps } from '../composables/useFileOps'
 
 const router = useRouter()
 const { docTitle, docAuthors, citations, isDirty } = useDocument()
+const { openDocument, saveDocument } = useFileOps()
 
 // ── Editor ────────────────────────────────────────────────────────────────────
 
@@ -74,7 +76,29 @@ const activeCitation = ref<BibEntry | null>(null)
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
 
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+
+async function handleKeydown(e: KeyboardEvent) {
+  const ctrl = e.ctrlKey || e.metaKey
+  if (!ctrl) return
+  if (e.key === 's') {
+    e.preventDefault()
+    const content = editor.value?.getHTML() ?? ''
+    await saveDocument(content)
+  }
+  if (e.key === 'o') {
+    e.preventDefault()
+    const body = await openDocument()
+    if (body && editor.value) {
+      editor.value.commands.setContent(body)
+      isDirty.value = false
+    }
+  }
+}
+
 onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
+
   emitter.on('cite:hover', ({ key, rect }) => {
     if (panelOpen.value) return
     cancelHide()
@@ -103,6 +127,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleKeydown)
   emitter.off('cite:hover')
   emitter.off('cite:leave')
   emitter.off('cite:click')

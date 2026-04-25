@@ -1,13 +1,28 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { invoke } from '@tauri-apps/api/core'
 import TitleBar from './components/TitleBar.vue'
 import Sidebar from './components/Sidebar.vue'
 import StatusBar from './components/StatusBar.vue'
 import { useDocument } from './composables/useDocument'
+import { emitter } from './events'
 
 const route = useRoute()
-const { docTitle, isDirty } = useDocument()
+const { docTitle, filePath, isDirty } = useDocument()
+
+async function handleExport() {
+  if (!filePath.value) return
+  const format = route.name === 'pdf' ? 'pdf' : 'pdf'
+  emitter.emit('export:start')
+  try {
+    const result = await invoke<string>('run_quarto', { docPath: filePath.value, format })
+    const outputPath = result.split('Output: ')[1]?.trim() ?? ''
+    emitter.emit('export:done', { outputPath })
+  } catch (e) {
+    emitter.emit('export:error', { message: String(e) })
+  }
+}
 
 const titleConfig = computed(() => {
   switch (route.name) {
@@ -42,6 +57,7 @@ const titleConfig = computed(() => {
       :subtitle="titleConfig.subtitle"
       :export-label="titleConfig.exportLabel"
       :is-dirty="isDirty"
+      :on-export="handleExport"
     />
     <div class="app-body">
       <Sidebar />
