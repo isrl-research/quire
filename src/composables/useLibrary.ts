@@ -87,6 +87,14 @@ export interface Tag {
   color: string
 }
 
+export interface Attachment {
+  id: number
+  itemId: number
+  fileName: string
+  filePath: string
+  addedAt: number
+}
+
 // ── Singletons ────────────────────────────────────────────────────────────────
 
 const items        = ref<LibraryItem[]>([])   // full unfiltered list
@@ -267,6 +275,24 @@ export function useLibrary() {
     return invoke<number>('export_bib_file', { itemIds, path })
   }
 
+  // ── Attachments ─────────────────────────────────────────────────────────────
+
+  async function pickAndAttachFile(itemId: number): Promise<Attachment | null> {
+    return invoke<Attachment | null>('pick_and_attach_file', { itemId })
+  }
+
+  async function getItemAttachments(itemId: number): Promise<Attachment[]> {
+    return invoke<Attachment[]>('get_item_attachments', { itemId })
+  }
+
+  async function removeAttachment(id: number): Promise<void> {
+    return invoke('remove_attachment', { id })
+  }
+
+  async function openAttachmentExternal(id: number): Promise<void> {
+    return invoke('open_attachment_external', { id })
+  }
+
   return {
     // state
     items, displayItems, loading, error, collections, tags, filterQuery,
@@ -280,5 +306,7 @@ export function useLibrary() {
     loadTags, createTag, updateTagColor, deleteTag, setItemTags,
     // import / export
     importBibFile, exportBibFile,
+    // attachments
+    pickAndAttachFile, getItemAttachments, removeAttachment, openAttachmentExternal,
   }
 }

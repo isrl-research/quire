@@ -95,6 +95,46 @@ pub struct Tag {
     pub color: String,
 }
 
+// ── Attachment / Annotation types ────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    pub id:        i64,
+    pub item_id:   i64,
+    pub file_name: String,
+    pub file_path: String,
+    pub added_at:  i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotation {
+    pub id:            i64,
+    pub item_id:       i64,
+    pub attachment_id: i64,
+    pub page:          i64,
+    pub ann_type:      String,
+    pub color:         String,
+    pub selected_text: Option<String>,
+    pub note_text:     Option<String>,
+    pub position_json: String,
+    pub created_at:    i64,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationInput {
+    pub item_id:       i64,
+    pub attachment_id: i64,
+    pub page:          i64,
+    pub ann_type:      String,
+    pub color:         String,
+    pub selected_text: Option<String>,
+    pub note_text:     Option<String>,
+    pub position_json: String,
+}
+
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 fn library_db_path() -> PathBuf {
@@ -109,6 +149,14 @@ fn bib_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".quire")
         .join("references.bib")
+}
+
+fn attachments_dir(item_id: i64) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".quire")
+        .join("attachments")
+        .join(item_id.to_string())
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
@@ -178,6 +226,27 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS trash (
             item_id    INTEGER NOT NULL PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
             deleted_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS attachments (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id   INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            file_name TEXT    NOT NULL,
+            file_path TEXT    NOT NULL,
+            added_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS annotations (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id        INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            attachment_id  INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+            page           INTEGER NOT NULL,
+            ann_type       TEXT    NOT NULL DEFAULT 'highlight',
+            color          TEXT    NOT NULL DEFAULT '#FACC15',
+            selected_text  TEXT,
+            note_text      TEXT,
+            position_json  TEXT    NOT NULL DEFAULT '{}',
+            created_at     INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         );",
     )
     .map_err(|e| e.to_string())
@@ -1097,4 +1166,181 @@ pub async fn fetch_isbn_metadata(isbn: String) -> Result<FetchedMetadata, String
         entry_type: Some("book".to_string()),
         ..Default::default()
     })
+}
+
+// ── Attachments ───────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn pick_and_attach_file(
+    app: tauri::AppHandle,
+    item_id: i64,
+) -> Result<Option<Attachment>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("PDF files", &["pdf", "PDF"])
+        .blocking_pick_file();
+    let Some(p) = picked else { return Ok(None) };
+    let src = p.into_path().map_err(|e| e.to_string())?;
+
+    let file_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("attachment.pdf")
+        .to_string();
+
+    let dest_dir = attachments_dir(item_id);
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(&file_name);
+    fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+
+    let dest_str = dest.to_string_lossy().to_string();
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT INTO attachments (item_id, file_name, file_path) VALUES (?1, ?2, ?3)",
+        params![item_id, file_name, dest_str],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let id = conn.last_insert_rowid();
+    let added_at: i64 = conn
+        .query_row("SELECT added_at FROM attachments WHERE id=?1", [id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+
+    Ok(Some(Attachment { id, item_id, file_name, file_path: dest_str, added_at }))
+}
+
+#[tauri::command]
+pub fn get_item_attachments(item_id: i64) -> Result<Vec<Attachment>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, item_id, file_name, file_path, added_at
+             FROM attachments WHERE item_id=?1 ORDER BY added_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([item_id], |row| {
+            Ok(Attachment {
+                id:        row.get(0)?,
+                item_id:   row.get(1)?,
+                file_name: row.get(2)?,
+                file_path: row.get(3)?,
+                added_at:  row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn read_attachment_bytes(id: i64) -> Result<Vec<u8>, String> {
+    let conn = open_conn()?;
+    let path: String = conn
+        .query_row("SELECT file_path FROM attachments WHERE id=?1", [id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    fs::read(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_attachment_external(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    let path: String = conn
+        .query_row("SELECT file_path FROM attachments WHERE id=?1", [id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    use tauri_plugin_opener::OpenerExt;
+    let url = format!("file:///{}", path.replace('\\', "/"));
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_attachment(id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    let path: String = conn
+        .query_row("SELECT file_path FROM attachments WHERE id=?1", [id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM attachments WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(&path);
+    Ok(())
+}
+
+// ── Annotations ───────────────────────────────────────────────────────────────
+
+fn row_to_annotation(row: &rusqlite::Row) -> rusqlite::Result<Annotation> {
+    Ok(Annotation {
+        id:            row.get(0)?,
+        item_id:       row.get(1)?,
+        attachment_id: row.get(2)?,
+        page:          row.get(3)?,
+        ann_type:      row.get(4)?,
+        color:         row.get(5)?,
+        selected_text: row.get(6)?,
+        note_text:     row.get(7)?,
+        position_json: row.get(8)?,
+        created_at:    row.get(9)?,
+    })
+}
+
+const ANN_SELECT: &str =
+    "SELECT id, item_id, attachment_id, page, ann_type, color,
+            selected_text, note_text, position_json, created_at
+     FROM annotations";
+
+#[tauri::command]
+pub fn create_annotation(input: AnnotationInput) -> Result<Annotation, String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT INTO annotations
+             (item_id, attachment_id, page, ann_type, color,
+              selected_text, note_text, position_json)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            input.item_id, input.attachment_id, input.page,
+            input.ann_type, input.color,
+            input.selected_text, input.note_text, input.position_json
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    let sql = format!("{} WHERE id=?1", ANN_SELECT);
+    conn.query_row(&sql, [id], row_to_annotation)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_annotations_for_attachment(attachment_id: i64) -> Result<Vec<Annotation>, String> {
+    let conn = open_conn()?;
+    let sql = format!("{} WHERE attachment_id=?1 ORDER BY page, created_at", ANN_SELECT);
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([attachment_id], row_to_annotation)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn delete_annotation(id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("DELETE FROM annotations WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_annotation_note(id: i64, note_text: String) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "UPDATE annotations SET note_text=?1 WHERE id=?2",
+        params![note_text, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }

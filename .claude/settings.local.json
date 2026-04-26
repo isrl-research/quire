@@ -10,7 +10,8 @@
       "Bash(xargs grep *)",
       "Bash(cargo build *)",
       "Bash(npm run *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(cargo check *)"
     ]
   }
 }

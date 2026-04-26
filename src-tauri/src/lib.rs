@@ -12,6 +12,12 @@ pub use library::{
     import_bib_file, export_bib_file,
     // metadata fetch
     fetch_doi_metadata, fetch_arxiv_metadata, fetch_isbn_metadata,
+    // attachments
+    pick_and_attach_file, get_item_attachments, read_attachment_bytes,
+    open_attachment_external, remove_attachment,
+    // annotations
+    create_annotation, get_annotations_for_attachment,
+    delete_annotation, update_annotation_note,
 };
 
 use serde::{Deserialize, Serialize};
@@ -673,6 +679,17 @@ pub fn run() {
             fetch_doi_metadata,
             fetch_arxiv_metadata,
             fetch_isbn_metadata,
+            // Library — attachments
+            pick_and_attach_file,
+            get_item_attachments,
+            read_attachment_bytes,
+            open_attachment_external,
+            remove_attachment,
+            // Library — annotations
+            create_annotation,
+            get_annotations_for_attachment,
+            delete_annotation,
+            update_annotation_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

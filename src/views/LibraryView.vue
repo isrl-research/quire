@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
-import { useLibrary, type LibraryItem, type ImportResult } from '../composables/useLibrary'
+import { useLibrary, type LibraryItem, type Attachment, type ImportResult } from '../composables/useLibrary'
 import LibraryEntryForm from '../components/LibraryEntryForm.vue'
 import CollectionsSidebar from '../components/CollectionsSidebar.vue'
+
+const router = useRouter()
 
 const {
   items, displayItems, loading, collections, tags, filterQuery,
@@ -11,6 +14,7 @@ const {
   deleteItem, createItem,
   addItemToCollection, removeItemFromCollection, getItemCollectionIds,
   importBibFile, exportBibFile,
+  pickAndAttachFile, getItemAttachments, removeAttachment, openAttachmentExternal,
 } = useLibrary()
 
 onMounted(() => {
@@ -169,16 +173,60 @@ const panelOpen = ref(false)
 const activeItemCollectionIds = ref<number[]>([])
 const addToCollId = ref<number | ''>('')
 
+// ── Attachments ───────────────────────────────────────────────────────────────
+
+const attachments = ref<Attachment[]>([])
+const attachingFile = ref(false)
+
+async function loadAttachments(itemId: number) {
+  attachments.value = await getItemAttachments(itemId)
+}
+
+async function attachFile() {
+  if (!activeItem.value) return
+  attachingFile.value = true
+  try {
+    const att = await pickAndAttachFile(activeItem.value.id)
+    if (att) attachments.value.push(att)
+  } finally {
+    attachingFile.value = false
+  }
+}
+
+async function deleteAttachment(id: number) {
+  await removeAttachment(id)
+  attachments.value = attachments.value.filter(a => a.id !== id)
+}
+
+function openInViewer(att: Attachment) {
+  router.push({
+    path: '/pdf',
+    query: {
+      id:     att.id.toString(),
+      itemId: (activeItem.value?.id ?? 0).toString(),
+      name:   att.fileName,
+    },
+  })
+}
+
+async function openExternal(id: number) {
+  await openAttachmentExternal(id)
+}
+
+// ── Detail panel ──────────────────────────────────────────────────────────────
+
 async function openItem(item: LibraryItem) {
   activeItem.value = item
   panelOpen.value = true
   activeItemCollectionIds.value = await getItemCollectionIds(item.id)
+  await loadAttachments(item.id)
 }
 
 function closePanel() {
   panelOpen.value = false
   activeItem.value = null
   activeItemCollectionIds.value = []
+  attachments.value = []
 }
 
 watch(activeItem, async (item) => {
@@ -547,6 +595,31 @@ const countLabel = computed(() => {
             </div>
             <div v-if="activeItemCollections.length === 0 && collectionsForAdd.length === 0" class="dp-empty-hint">
               No collections
+            </div>
+          </div>
+
+          <!-- Files (attachments) -->
+          <div class="dp-block">
+            <div class="dp-block-label dp-files-header">
+              Files
+              <button class="dp-attach-btn" @click="attachFile" :disabled="attachingFile" title="Attach PDF">
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                  <line x1="5.5" y1="1" x2="5.5" y2="10"/>
+                  <line x1="1" y1="5.5" x2="10" y2="5.5"/>
+                </svg>
+              </button>
+            </div>
+            <div v-if="attachments.length === 0" class="dp-empty-hint">No files attached</div>
+            <div v-for="att in attachments" :key="att.id" class="dp-file-row">
+              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="dp-file-icon">
+                <rect x="1.5" y="0.5" width="8" height="10" rx="1"/>
+                <line x1="3.5" y1="4" x2="7.5" y2="4"/>
+                <line x1="3.5" y1="6" x2="7.5" y2="6"/>
+                <line x1="3.5" y1="8" x2="5.5" y2="8"/>
+              </svg>
+              <span class="dp-file-name" @click="openInViewer(att)" title="Open in Quire viewer">{{ att.fileName }}</span>
+              <button class="dp-file-ext" @click="openExternal(att.id)" title="Open in system PDF reader">↗</button>
+              <button class="dp-file-del" @click="deleteAttachment(att.id)" title="Remove attachment">×</button>
             </div>
           </div>
 
@@ -1395,4 +1468,67 @@ const countLabel = computed(() => {
   transform: translateX(100%);
   opacity: 0;
 }
+
+/* ── Files / Attachments ──────────────────────────────────────────────────── */
+
+.dp-files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dp-attach-btn {
+  background: none;
+  border: 1px solid var(--border-medium);
+  border-radius: 4px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 0;
+  transition: background var(--t);
+}
+.dp-attach-btn:hover:not(:disabled) { background: var(--bg-chrome); }
+.dp-attach-btn:disabled { opacity: 0.4; cursor: default; }
+
+.dp-file-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.dp-file-row:last-child { border-bottom: none; }
+
+.dp-file-icon { color: var(--text-tertiary); flex-shrink: 0; }
+
+.dp-file-name {
+  flex: 1;
+  font-size: 11.5px;
+  color: var(--accent);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.dp-file-name:hover { text-decoration: underline; }
+
+.dp-file-ext,
+.dp-file-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  padding: 0 2px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color var(--t);
+}
+.dp-file-ext:hover { color: var(--accent); }
+.dp-file-del:hover { color: #E8650A; }
 </style>
