@@ -356,18 +356,18 @@ function toggleFocusMode() {
 function updateDocAbove() {
   const root = documentAreaRef.value
   if (!root) return
-  const pm = root.querySelector('.ProseMirror')
+  const pm = root.querySelector('.ProseMirror') as HTMLElement | null
   if (!pm) return
-  const rootTop = root.getBoundingClientRect().top
-  // A block is "above" when its bottom edge has cleared the top of the scroll area
-  // (with a small buffer so the last line of a heading stays visible as you cross it)
-  const threshold = rootTop + 48
-  Array.from(pm.children).forEach(el => {
-    const bottom = el.getBoundingClientRect().bottom
+  const rootRect = root.getBoundingClientRect()
+  // Dim blocks whose bottom enters the top 30 % of the scroll container viewport.
+  // ~200 px of scroll on a typical screen triggers the first fade.
+  const threshold = rootRect.top + rootRect.height * 0.3
+  Array.from(pm.children).forEach(child => {
+    const bottom = (child as HTMLElement).getBoundingClientRect().bottom
     if (bottom < threshold) {
-      el.classList.add('doc-above')
+      child.classList.add('doc-above')
     } else {
-      el.classList.remove('doc-above')
+      child.classList.remove('doc-above')
     }
   })
 }
