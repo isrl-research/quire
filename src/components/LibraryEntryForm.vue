@@ -231,8 +231,12 @@ const fetchError   = ref('')
 const fetchedMeta  = ref<FetchedMetadata | null>(null)
 const fetchSource  = ref('')
 
+function stripDoiUrl(s: string): string {
+  return s.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').replace(/^doi:/i, '').trim()
+}
+
 function detectIdType(id: string): 'doi' | 'arxiv' | 'isbn' {
-  const s = id.trim()
+  const s = stripDoiUrl(id.trim())
   if (/^10\.\d{4}/.test(s)) return 'doi'
   if (/^(arXiv:|arxiv:)?\d{4}\.\d{4,5}(v\d+)?$/.test(s)) return 'arxiv'
   if (/^(arXiv:|arxiv:)?[a-z-]+\/\d+$/i.test(s)) return 'arxiv'

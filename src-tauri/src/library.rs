@@ -827,37 +827,32 @@ fn xml_tag_text(xml: &str, tag: &str) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-// ── DOI fetch via CrossRef ────────────────────────────────────────────────────
+// ── DOI fetch — CrossRef + DataCite fallback ─────────────────────────────────
 
-#[tauri::command]
-pub async fn fetch_doi_metadata(doi: String) -> Result<FetchedMetadata, String> {
-    let url = format!("https://api.crossref.org/works/{}", doi.trim());
-    let client = reqwest::Client::builder()
-        .user_agent("Quire/1.0 (https://github.com/quire)")
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let resp = client.get(&url).send().await
-        .map_err(|e| format!("Network error: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("DOI not found (HTTP {})", resp.status().as_u16()));
+fn normalize_doi(raw: &str) -> &str {
+    let s = raw.trim();
+    for prefix in &[
+        "https://doi.org/", "http://doi.org/",
+        "https://dx.doi.org/", "http://dx.doi.org/",
+        "doi:", "DOI:",
+    ] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest.trim();
+        }
     }
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let msg = &json["message"];
+    s
+}
 
+fn parse_crossref_message(msg: &serde_json::Value, fallback_doi: &str) -> FetchedMetadata {
     let title = msg["title"].as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .map(String::from);
+        .and_then(|a| a.first()).and_then(|v| v.as_str()).map(String::from);
 
     let authors = msg["author"].as_array().map(|arr| {
         arr.iter().filter_map(|a| {
             let fam = a["family"].as_str()?;
             let giv = a["given"].as_str().unwrap_or("");
             Some(if giv.is_empty() { fam.to_string() } else { format!("{fam}, {giv}") })
-        })
-        .collect::<Vec<_>>()
-        .join(" and ")
+        }).collect::<Vec<_>>().join(" and ")
     }).filter(|s| !s.is_empty());
 
     let year = msg["published"]["date-parts"]
@@ -866,29 +861,108 @@ pub async fn fetch_doi_metadata(doi: String) -> Result<FetchedMetadata, String> 
         .and_then(|y| y.as_u64()).map(|y| y.to_string());
 
     let journal = msg["container-title"].as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+        .and_then(|a| a.first()).and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty()).map(String::from);
 
     let volume    = msg["volume"].as_str().map(String::from);
     let issue     = msg["issue"].as_str().map(String::from);
     let pages     = msg["page"].as_str().map(String::from);
     let doi_val   = msg["DOI"].as_str().map(String::from)
-        .unwrap_or_else(|| doi.trim().to_string());
+        .unwrap_or_else(|| fallback_doi.to_string());
     let issn      = msg["ISSN"].as_array()
         .and_then(|a| a.first()).and_then(|v| v.as_str()).map(String::from);
     let publisher = msg["publisher"].as_str().map(String::from);
     let url_val   = msg["URL"].as_str().map(String::from);
     let abstract_text = msg["abstract"].as_str()
         .map(|s| strip_xml_tags(s)).filter(|s| !s.is_empty());
+    let entry_type = match msg["type"].as_str() {
+        Some("journal-article") => Some("article".to_string()),
+        Some("book") | Some("monograph") => Some("book".to_string()),
+        Some("proceedings-article") => Some("inproceedings".to_string()),
+        Some("report") => Some("techreport".to_string()),
+        _ => Some("misc".to_string()),
+    };
 
-    Ok(FetchedMetadata {
+    FetchedMetadata {
         title, authors, year, journal, volume, issue, pages,
         doi: Some(doi_val), issn, publisher, url: url_val, abstract_text,
-        entry_type: Some("article".to_string()),
+        entry_type, ..Default::default()
+    }
+}
+
+fn parse_datacite_attrs(attrs: &serde_json::Value, fallback_doi: &str) -> FetchedMetadata {
+    let title = attrs["titles"].as_array()
+        .and_then(|a| a.first()).and_then(|t| t["title"].as_str()).map(String::from);
+
+    let authors = attrs["creators"].as_array().map(|arr| {
+        arr.iter().filter_map(|c| {
+            let fam = c["familyName"].as_str();
+            let giv = c["givenName"].as_str();
+            match (fam, giv) {
+                (Some(f), Some(g)) => Some(format!("{f}, {g}")),
+                (Some(f), None)    => Some(f.to_string()),
+                _                  => c["name"].as_str().map(String::from),
+            }
+        }).collect::<Vec<_>>().join(" and ")
+    }).filter(|s| !s.is_empty());
+
+    let year = attrs["publicationYear"].as_u64().map(|y| y.to_string());
+    let publisher = attrs["publisher"].as_str().map(String::from);
+    let doi_val   = attrs["doi"].as_str().map(String::from)
+        .unwrap_or_else(|| fallback_doi.to_string());
+
+    let abstract_text = attrs["descriptions"].as_array().and_then(|arr| {
+        arr.iter().find(|d| d["descriptionType"].as_str() == Some("Abstract"))
+            .and_then(|d| d["description"].as_str())
+            .map(|s| strip_xml_tags(s))
+    }).filter(|s| !s.is_empty());
+
+    let entry_type = match attrs["types"]["resourceTypeGeneral"].as_str() {
+        Some("JournalArticle") => Some("article".to_string()),
+        Some("Book")           => Some("book".to_string()),
+        Some("ConferencePaper") => Some("inproceedings".to_string()),
+        Some("Report")         => Some("techreport".to_string()),
+        _                      => Some("misc".to_string()),
+    };
+
+    FetchedMetadata {
+        title, authors, year, publisher,
+        doi: Some(doi_val),
+        abstract_text, entry_type,
         ..Default::default()
-    })
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_doi_metadata(doi: String) -> Result<FetchedMetadata, String> {
+    let clean = normalize_doi(&doi).to_string();
+
+    let client = reqwest::Client::builder()
+        .user_agent("Quire/1.0 (https://github.com/quire)")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Try CrossRef first (covers most journal articles and arXiv DOIs)
+    let cr_url = format!("https://api.crossref.org/works/{clean}");
+    if let Ok(resp) = client.get(&cr_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                return Ok(parse_crossref_message(&json["message"], &clean));
+            }
+        }
+    }
+
+    // Fallback: DataCite API (covers Zenodo, figshare, etc.)
+    let dc_url = format!("https://api.datacite.org/dois/{clean}");
+    if let Ok(resp) = client.get(&dc_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                return Ok(parse_datacite_attrs(&json["data"]["attributes"], &clean));
+            }
+        }
+    }
+
+    Err(format!("DOI not found in CrossRef or DataCite: {clean}"))
 }
 
 // ── arXiv fetch ───────────────────────────────────────────────────────────────
