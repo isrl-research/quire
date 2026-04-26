@@ -230,6 +230,7 @@ async function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     if (findOpen.value) { e.preventDefault(); closeFind(); return }
   }
+  if (e.key === 'F11') { e.preventDefault(); toggleFocusMode(); return }
   if (!ctrl) return
   if (e.key === 's') {
     e.preventDefault()
@@ -337,6 +338,48 @@ function removeAuthor(i: number) {
   docAuthors.value.splice(i, 1)
 }
 
+// ── Focus mode ────────────────────────────────────────────────────────────────
+
+const focusMode = ref(false)
+const documentAreaRef = ref<HTMLElement | null>(null)
+
+function toggleFocusMode() {
+  focusMode.value = !focusMode.value
+  if (focusMode.value) {
+    // Run once immediately so the current scroll position is reflected
+    updateDocAbove()
+  } else {
+    clearDocAbove()
+  }
+}
+
+function updateDocAbove() {
+  const root = documentAreaRef.value
+  if (!root) return
+  const pm = root.querySelector('.ProseMirror')
+  if (!pm) return
+  const rootTop = root.getBoundingClientRect().top
+  // A block is "above" when its bottom edge has cleared the top of the scroll area
+  // (with a small buffer so the last line of a heading stays visible as you cross it)
+  const threshold = rootTop + 48
+  Array.from(pm.children).forEach(el => {
+    const bottom = el.getBoundingClientRect().bottom
+    if (bottom < threshold) {
+      el.classList.add('doc-above')
+    } else {
+      el.classList.remove('doc-above')
+    }
+  })
+}
+
+function clearDocAbove() {
+  document.querySelectorAll('.doc-above').forEach(el => el.classList.remove('doc-above'))
+}
+
+function onDocScroll() {
+  if (focusMode.value) updateDocAbove()
+}
+
 // ── Byline helpers ────────────────────────────────────────────────────────────
 
 const uniqueAffiliations = computed(() => {
@@ -367,11 +410,28 @@ function openOrcid(orcid: string) {
 <template>
   <div class="write-layout">
     <!-- Document scroll area -->
-    <div class="document-area">
+    <div
+      class="document-area"
+      :class="{ 'focus-mode': focusMode }"
+      ref="documentAreaRef"
+      @scroll.passive="onDocScroll"
+    >
       <div class="paper">
         <!-- Paper header -->
         <div class="paper-eyebrow">
           <span>{{ docStatus }}{{ docDate ? ' · ' + docDate : '' }}</span>
+          <button
+            class="meta-trigger"
+            :class="{ 'focus-active': focusMode }"
+            @click="toggleFocusMode"
+            :title="focusMode ? 'Exit focus mode (F11)' : 'Focus mode (F11)'"
+            style="margin-left: auto"
+          >
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="7" cy="7" r="2.5"/>
+              <circle cx="7" cy="7" r="5.5" :stroke-opacity="focusMode ? 1 : 0.45"/>
+            </svg>
+          </button>
           <button class="meta-trigger" @click="openMeta" title="Edit document metadata">
             <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M8.5 1.5a1.414 1.414 0 0 1 2 2L3 11H1v-2L8.5 1.5z"/>
@@ -676,13 +736,17 @@ function openOrcid(orcid: string) {
 .paper-eyebrow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   font-size: 10.5px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: var(--text-secondary);
   margin-bottom: 14px;
+}
+
+.paper-eyebrow > span {
+  flex: 1;
 }
 
 .meta-trigger {
@@ -702,9 +766,18 @@ function openOrcid(orcid: string) {
   opacity: 1;
 }
 
+.meta-trigger.focus-active {
+  opacity: 1;
+  color: var(--accent-purple, #7C3AED);
+}
+
 .meta-trigger:hover {
   background: var(--bg-chrome-active);
   color: var(--text-secondary);
+}
+
+.meta-trigger.focus-active:hover {
+  color: var(--accent-purple, #7C3AED);
 }
 
 .paper-title {

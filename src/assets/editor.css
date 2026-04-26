@@ -142,6 +142,16 @@
   border-radius: 2px;
 }
 
+/* ── Focus mode ────────────────────────────────────────────── */
+
+.ProseMirror > * {
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.focus-mode .ProseMirror > .doc-above {
+  opacity: 0.28;
+}
+
 /* ── Section cross-references ──────────────────────────────── */
 
 .section-ref-inline {
