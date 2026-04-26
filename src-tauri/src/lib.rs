@@ -8,6 +8,10 @@ pub use library::{
     get_item_collection_ids, remove_item_from_collection, rename_collection,
     // tags
     create_tag, delete_tag, get_tags, set_item_tags, update_tag_color,
+    // import / export
+    import_bib_file, export_bib_file,
+    // metadata fetch
+    fetch_doi_metadata, fetch_arxiv_metadata, fetch_isbn_metadata,
 };
 
 use serde::{Deserialize, Serialize};
@@ -312,6 +316,35 @@ async fn find_bib_for_document(doc_path: String) -> Result<Option<String>, Strin
 }
 
 #[tauri::command]
+async fn pick_import_bib(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("BibTeX", &["bib"])
+        .blocking_pick_file();
+    match path {
+        Some(p) => Ok(Some(p.into_path().map_err(|e| e.to_string())?.to_string_lossy().to_string())),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn pick_export_bib(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("BibTeX", &["bib"])
+        .set_file_name("references.bib")
+        .blocking_save_file();
+    match path {
+        Some(p) => Ok(Some(p.into_path().map_err(|e| e.to_string())?.to_string_lossy().to_string())),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
 async fn run_quarto(doc_path: String, format: String) -> Result<String, String> {
     let output = Command::new("quarto")
         .args(["render", &doc_path, "--to", &format])
@@ -392,7 +425,7 @@ fn clean_yaml_string(s: &str) -> String {
 
 // ── .bib parser ───────────────────────────────────────────────────────────────
 
-fn parse_bib(content: &str) -> Vec<BibEntry> {
+pub(crate) fn parse_bib(content: &str) -> Vec<BibEntry> {
     let mut entries = Vec::new();
     let chars: Vec<char> = content.chars().collect();
     let mut i = 0;
@@ -603,6 +636,8 @@ pub fn run() {
             get_recent_files,
             add_recent_file,
             // Documents
+            pick_import_bib,
+            pick_export_bib,
             open_document,
             open_document_path,
             save_document,
@@ -631,6 +666,13 @@ pub fn run() {
             update_tag_color,
             delete_tag,
             set_item_tags,
+            // Library — import / export
+            import_bib_file,
+            export_bib_file,
+            // Library — metadata fetch
+            fetch_doi_metadata,
+            fetch_arxiv_metadata,
+            fetch_isbn_metadata,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

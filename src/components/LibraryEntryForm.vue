@@ -1,6 +1,27 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { useLibrary, type LibraryItem, type ItemInput } from '../composables/useLibrary'
+
+// ── Fetch types ───────────────────────────────────────────────────────────────
+
+interface FetchedMetadata {
+  title?:        string
+  authors?:      string
+  year?:         string
+  journal?:      string
+  volume?:       string
+  issue?:        string
+  pages?:        string
+  doi?:          string
+  issn?:         string
+  publisher?:    string
+  url?:          string
+  abstractText?: string
+  booktitle?:    string
+  isbn?:         string
+  entryType?:    string
+}
 
 const { createItem, updateItem, tags, displayItems, createTag, setItemTags } = useLibrary()
 
@@ -202,6 +223,93 @@ async function save() {
   }
 }
 
+// ── Metadata fetch ────────────────────────────────────────────────────────────
+
+const fetchId      = ref('')
+const fetching     = ref(false)
+const fetchError   = ref('')
+const fetchedMeta  = ref<FetchedMetadata | null>(null)
+const fetchSource  = ref('')
+
+function detectIdType(id: string): 'doi' | 'arxiv' | 'isbn' {
+  const s = id.trim()
+  if (/^10\.\d{4}/.test(s)) return 'doi'
+  if (/^(arXiv:|arxiv:)?\d{4}\.\d{4,5}(v\d+)?$/.test(s)) return 'arxiv'
+  if (/^(arXiv:|arxiv:)?[a-z-]+\/\d+$/i.test(s)) return 'arxiv'
+  const digits = s.replace(/[^0-9X]/gi, '')
+  if (digits.length === 10 || digits.length === 13) return 'isbn'
+  return 'doi'
+}
+
+async function fetchMetadata() {
+  const id = fetchId.value.trim()
+  if (!id) return
+  fetching.value = true
+  fetchError.value = ''
+  fetchedMeta.value = null
+  try {
+    const type = detectIdType(id)
+    if (type === 'doi') {
+      fetchSource.value = 'CrossRef'
+      fetchedMeta.value = await invoke<FetchedMetadata>('fetch_doi_metadata', { doi: id })
+    } else if (type === 'arxiv') {
+      fetchSource.value = 'arXiv'
+      fetchedMeta.value = await invoke<FetchedMetadata>('fetch_arxiv_metadata', { arxivId: id })
+    } else {
+      fetchSource.value = 'OpenLibrary'
+      fetchedMeta.value = await invoke<FetchedMetadata>('fetch_isbn_metadata', { isbn: id })
+    }
+  } catch (e) {
+    fetchError.value = String(e)
+  } finally {
+    fetching.value = false
+  }
+}
+
+const FETCH_FIELD_LABELS: Partial<Record<keyof FetchedMetadata, string>> = {
+  title: 'Title', authors: 'Authors', year: 'Year', journal: 'Journal',
+  volume: 'Volume', issue: 'Issue No.', pages: 'Pages', doi: 'DOI',
+  issn: 'ISSN', publisher: 'Publisher', url: 'URL', abstractText: 'Abstract',
+  booktitle: 'Conference', isbn: 'ISBN', entryType: 'Type',
+}
+
+const fetchedFields = computed(() => {
+  if (!fetchedMeta.value) return []
+  return (Object.keys(fetchedMeta.value) as (keyof FetchedMetadata)[])
+    .filter(k => fetchedMeta.value![k] !== undefined && FETCH_FIELD_LABELS[k])
+    .map(k => ({ key: k, label: FETCH_FIELD_LABELS[k]!, value: fetchedMeta.value![k]! }))
+})
+
+function applyFetchField(key: keyof FetchedMetadata) {
+  const val = fetchedMeta.value?.[key]
+  if (val === undefined) return
+  switch (key) {
+    case 'title':        title.value        = val; break
+    case 'authors':      authors.value      = val; break
+    case 'year':         year.value         = val; break
+    case 'journal':      journal.value      = val; break
+    case 'volume':       volume.value       = val; break
+    case 'issue':        number.value       = val; break
+    case 'pages':        pages.value        = val; break
+    case 'doi':          doi.value          = val; break
+    case 'issn':         issn.value         = val; break
+    case 'publisher':    publisher.value    = val; break
+    case 'url':          url.value          = val; break
+    case 'abstractText': abstractText.value = val; break
+    case 'booktitle':    booktitle.value    = val; break
+    case 'isbn':         isbn.value         = val; break
+    case 'entryType':    entryType.value    = val; break
+  }
+}
+
+function applyAllFetched() {
+  if (!fetchedMeta.value) return
+  for (const key of Object.keys(fetchedMeta.value) as (keyof FetchedMetadata)[]) {
+    applyFetchField(key)
+  }
+  fetchedMeta.value = null
+}
+
 function onBackdropClick(e: MouseEvent) {
   if (e.target === e.currentTarget) emit('close')
 }
@@ -225,6 +333,43 @@ function onBackdropClick(e: MouseEvent) {
 
         <!-- Body -->
         <div class="fs-body">
+
+          <!-- Metadata fetch -->
+          <div class="fetch-row">
+            <input
+              v-model="fetchId"
+              class="fs-input fetch-input"
+              placeholder="DOI, arXiv ID, or ISBN…"
+              @keydown.enter="fetchMetadata"
+            />
+            <button
+              class="fetch-btn"
+              :disabled="!fetchId.trim() || fetching"
+              @click="fetchMetadata"
+              type="button"
+            >{{ fetching ? '…' : 'Fetch' }}</button>
+          </div>
+
+          <!-- Fetch error -->
+          <p class="fetch-error" v-if="fetchError">{{ fetchError }}</p>
+
+          <!-- Fetch result diff panel -->
+          <div class="fetch-panel" v-if="fetchedMeta && fetchedFields.length">
+            <div class="fetch-panel-head">
+              <span class="fetch-panel-source">From {{ fetchSource }}</span>
+              <div class="fetch-panel-actions">
+                <button class="fetch-apply-all" @click="applyAllFetched" type="button">Apply All</button>
+                <button class="fetch-dismiss" @click="fetchedMeta = null" type="button">Dismiss</button>
+              </div>
+            </div>
+            <div class="fetch-fields">
+              <div v-for="f in fetchedFields" :key="f.key" class="fetch-field">
+                <span class="fetch-field-label">{{ f.label }}</span>
+                <span class="fetch-field-value">{{ f.value.length > 80 ? f.value.slice(0, 80) + '…' : f.value }}</span>
+                <button class="fetch-field-apply" @click="applyFetchField(f.key)" type="button">↓</button>
+              </div>
+            </div>
+          </div>
 
           <!-- Entry type row -->
           <div class="fs-field-row">
@@ -715,4 +860,143 @@ function onBackdropClick(e: MouseEvent) {
 
 .tag-add-confirm:hover { opacity: 0.8; }
 .tag-add-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Metadata fetch ──────────────────────────────────────────────────────────── */
+
+.fetch-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.fetch-input {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.fetch-btn {
+  height: 30px;
+  padding: 0 12px;
+  background: var(--bg-chrome-active);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: background var(--t), opacity var(--t);
+  flex-shrink: 0;
+}
+.fetch-btn:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
+.fetch-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.fetch-error {
+  font-size: 11.5px;
+  color: var(--accent-orange);
+  padding: 2px 0;
+}
+
+.fetch-panel {
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius);
+  background: var(--bg-chrome);
+  overflow: hidden;
+}
+
+.fetch-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fetch-panel-source {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--accent);
+}
+
+.fetch-panel-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.fetch-apply-all {
+  height: 24px;
+  padding: 0 10px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--t);
+}
+.fetch-apply-all:hover { opacity: 0.88; }
+
+.fetch-dismiss {
+  height: 24px;
+  padding: 0 8px;
+  background: none;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  transition: background var(--t);
+}
+.fetch-dismiss:hover { background: var(--bg-chrome-active); }
+
+.fetch-fields {
+  padding: 4px 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.fetch-field {
+  display: grid;
+  grid-template-columns: 72px 1fr 24px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+}
+
+.fetch-field-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  text-align: right;
+}
+
+.fetch-field-value {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fetch-field-apply {
+  background: none;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--accent);
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--t);
+}
+.fetch-field-apply:hover { background: var(--accent-soft); }
 </style>

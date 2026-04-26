@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::BibEntry;
+use crate::{BibEntry, parse_bib};
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -686,4 +686,293 @@ pub fn set_item_tags(item_id: i64, tag_ids: Vec<i64>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ── Import / Export types ─────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub added:   usize,
+    pub skipped: usize,
+    pub errors:  Vec<String>,
+}
+
+// ── Metadata fetch types ──────────────────────────────────────────────────────
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedMetadata {
+    pub title:         Option<String>,
+    pub authors:       Option<String>,
+    pub year:          Option<String>,
+    pub journal:       Option<String>,
+    pub volume:        Option<String>,
+    pub issue:         Option<String>,
+    pub pages:         Option<String>,
+    pub doi:           Option<String>,
+    pub issn:          Option<String>,
+    pub publisher:     Option<String>,
+    pub url:           Option<String>,
+    pub abstract_text: Option<String>,
+    pub booktitle:     Option<String>,
+    pub isbn:          Option<String>,
+    pub entry_type:    Option<String>,
+}
+
+// ── Import / Export commands ──────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn import_bib_file(path: String, mode: String) -> Result<ImportResult, String> {
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let entries = parse_bib(&content);
+    let conn = open_conn()?;
+
+    let replace = mode == "replace";
+    let mut added   = 0usize;
+    let mut skipped = 0usize;
+    let mut errors: Vec<String> = vec![];
+
+    let sql_merge   = "INSERT OR IGNORE INTO items
+         (key,entry_type,title,authors,year,journal,doi,abstract_text,url,
+          volume,issue,pages,publisher,booktitle,edition,month,keywords,
+          note,isbn,issn,number,institution)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)";
+    let sql_replace = "INSERT OR REPLACE INTO items
+         (key,entry_type,title,authors,year,journal,doi,abstract_text,url,
+          volume,issue,pages,publisher,booktitle,edition,month,keywords,
+          note,isbn,issn,number,institution)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)";
+    let sql = if replace { sql_replace } else { sql_merge };
+
+    for entry in &entries {
+        match conn.execute(sql, params![
+            entry.key, entry.entry_type, entry.title, entry.authors, entry.year,
+            entry.journal, entry.doi, entry.abstract_text, entry.url, entry.volume,
+            entry.issue, entry.pages, entry.publisher, entry.booktitle, entry.edition,
+            entry.month, entry.keywords, entry.note, entry.isbn, entry.issn,
+            entry.number, entry.institution
+        ]) {
+            Ok(rows) => { if rows > 0 { added += 1; } else { skipped += 1; } }
+            Err(e)   => { errors.push(format!("{}: {}", entry.key, e)); }
+        }
+    }
+
+    let _ = regenerate_bib(&conn);
+    Ok(ImportResult { added, skipped, errors })
+}
+
+#[tauri::command]
+pub fn export_bib_file(item_ids: Vec<i64>, path: String) -> Result<usize, String> {
+    let conn = open_conn()?;
+    let items: Vec<LibraryItem> = if item_ids.is_empty() {
+        let sql = format!(
+            "{} WHERE i.id NOT IN (SELECT item_id FROM trash) GROUP BY i.id ORDER BY i.added_at ASC",
+            ITEM_SELECT
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| row_to_item(row))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    } else {
+        let placeholders: Vec<String> =
+            (1..=item_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "{} WHERE i.id IN ({}) GROUP BY i.id ORDER BY i.added_at ASC",
+            ITEM_SELECT,
+            placeholders.join(",")
+        );
+        let binds: Vec<Value> = item_ids.iter().map(|&id| Value::Integer(id)).collect();
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            binds.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(refs.as_slice(), |row| row_to_item(row))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    let count = items.len();
+    fs::write(&path, items_to_bib(&items)).map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
+// ── Metadata fetch helpers ────────────────────────────────────────────────────
+
+fn strip_xml_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn xml_tag_text(xml: &str, tag: &str) -> Option<String> {
+    let open  = format!("<{}", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)?;
+    let after = &xml[start..];
+    let cs = after.find('>')? + 1;
+    let ce = after.find(&close)?;
+    if cs >= ce { return None; }
+    let text = strip_xml_tags(after[cs..ce].trim());
+    if text.is_empty() { None } else { Some(text) }
+}
+
+// ── DOI fetch via CrossRef ────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn fetch_doi_metadata(doi: String) -> Result<FetchedMetadata, String> {
+    let url = format!("https://api.crossref.org/works/{}", doi.trim());
+    let client = reqwest::Client::builder()
+        .user_agent("Quire/1.0 (https://github.com/quire)")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&url).send().await
+        .map_err(|e| format!("Network error: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("DOI not found (HTTP {})", resp.status().as_u16()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let msg = &json["message"];
+
+    let title = msg["title"].as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let authors = msg["author"].as_array().map(|arr| {
+        arr.iter().filter_map(|a| {
+            let fam = a["family"].as_str()?;
+            let giv = a["given"].as_str().unwrap_or("");
+            Some(if giv.is_empty() { fam.to_string() } else { format!("{fam}, {giv}") })
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
+    }).filter(|s| !s.is_empty());
+
+    let year = msg["published"]["date-parts"]
+        .as_array().and_then(|a| a.first())
+        .and_then(|dp| dp.as_array()).and_then(|dp| dp.first())
+        .and_then(|y| y.as_u64()).map(|y| y.to_string());
+
+    let journal = msg["container-title"].as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let volume    = msg["volume"].as_str().map(String::from);
+    let issue     = msg["issue"].as_str().map(String::from);
+    let pages     = msg["page"].as_str().map(String::from);
+    let doi_val   = msg["DOI"].as_str().map(String::from)
+        .unwrap_or_else(|| doi.trim().to_string());
+    let issn      = msg["ISSN"].as_array()
+        .and_then(|a| a.first()).and_then(|v| v.as_str()).map(String::from);
+    let publisher = msg["publisher"].as_str().map(String::from);
+    let url_val   = msg["URL"].as_str().map(String::from);
+    let abstract_text = msg["abstract"].as_str()
+        .map(|s| strip_xml_tags(s)).filter(|s| !s.is_empty());
+
+    Ok(FetchedMetadata {
+        title, authors, year, journal, volume, issue, pages,
+        doi: Some(doi_val), issn, publisher, url: url_val, abstract_text,
+        entry_type: Some("article".to_string()),
+        ..Default::default()
+    })
+}
+
+// ── arXiv fetch ───────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn fetch_arxiv_metadata(arxiv_id: String) -> Result<FetchedMetadata, String> {
+    let raw = arxiv_id.trim()
+        .trim_start_matches("arXiv:")
+        .trim_start_matches("arxiv:");
+    let clean = raw.split('v').next().unwrap_or(raw).trim();
+
+    let url = format!("https://export.arxiv.org/api/query?id_list={clean}");
+    let xml = reqwest::get(&url).await
+        .map_err(|e| format!("Network error: {e}"))?
+        .text().await.map_err(|e| e.to_string())?;
+
+    if xml.contains("<opensearch:totalResults>0</opensearch:totalResults>") {
+        return Err("arXiv ID not found".to_string());
+    }
+
+    let title   = xml_tag_text(&xml, "title").filter(|s| !s.contains("ArXiv Query"));
+    let summary = xml_tag_text(&xml, "summary");
+    let year    = xml_tag_text(&xml, "published").and_then(|d| d.get(..4).map(String::from));
+    let doi     = xml_tag_text(&xml, "arxiv:doi");
+    let journal = xml_tag_text(&xml, "arxiv:journal_ref");
+    let url_val = xml_tag_text(&xml, "id").filter(|s| s.contains("arxiv.org"));
+
+    // Collect all <author> blocks
+    let authors = {
+        let mut names = Vec::new();
+        let mut pos = 0usize;
+        while let Some(rel) = xml[pos..].find("<author>") {
+            let s = pos + rel;
+            let e = xml[s..].find("</author>").map(|x| s + x + 9).unwrap_or(s + 8);
+            if let Some(name) = xml_tag_text(&xml[s..e], "name") {
+                names.push(name);
+            }
+            pos = e;
+        }
+        if names.is_empty() { None } else { Some(names.join(" and ")) }
+    };
+
+    Ok(FetchedMetadata {
+        title, authors, year, journal, doi, url: url_val,
+        abstract_text: summary,
+        entry_type: Some("misc".to_string()),
+        ..Default::default()
+    })
+}
+
+// ── ISBN fetch via OpenLibrary ────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn fetch_isbn_metadata(isbn: String) -> Result<FetchedMetadata, String> {
+    let clean: String = isbn.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let url = format!(
+        "https://openlibrary.org/api/books?bibkeys=ISBN:{clean}&format=json&jscmd=data"
+    );
+    let json: serde_json::Value = reqwest::get(&url).await
+        .map_err(|e| format!("Network error: {e}"))?
+        .json().await.map_err(|e| e.to_string())?;
+
+    let key  = format!("ISBN:{clean}");
+    let book = json.get(&key).ok_or("ISBN not found in OpenLibrary")?;
+
+    let title = book["title"].as_str().map(String::from);
+
+    let authors = book["authors"].as_array().map(|arr| {
+        arr.iter().filter_map(|a| a["name"].as_str()).collect::<Vec<_>>().join(" and ")
+    }).filter(|s| !s.is_empty());
+
+    // publish_date can be "April 2004", "2004", "2004-03-01"
+    let year = book["publish_date"].as_str().and_then(|d| {
+        d.split(|c: char| !c.is_ascii_digit()).find(|p| p.len() == 4).map(String::from)
+    });
+
+    let publisher = book["publishers"].as_array()
+        .and_then(|a| a.first())
+        .and_then(|p| p["name"].as_str())
+        .map(String::from);
+
+    Ok(FetchedMetadata {
+        title, authors, year, publisher, isbn: Some(clean),
+        entry_type: Some("book".to_string()),
+        ..Default::default()
+    })
 }

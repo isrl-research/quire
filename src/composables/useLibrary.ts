@@ -57,6 +57,12 @@ export interface ItemInput {
   institution?: string
 }
 
+export interface ImportResult {
+  added:   number
+  skipped: number
+  errors:  string[]
+}
+
 export interface SearchQuery {
   text?: string
   entryTypes?: string[]
@@ -248,6 +254,19 @@ export function useLibrary() {
     await refreshAndFilter()
   }
 
+  // ── Import / Export ─────────────────────────────────────────────────────────
+
+  async function importBibFile(path: string, mode: string): Promise<ImportResult> {
+    const result = await invoke<ImportResult>('import_bib_file', { path, mode })
+    await refreshAndFilter()
+    await loadCollections()
+    return result
+  }
+
+  async function exportBibFile(itemIds: number[], path: string): Promise<number> {
+    return invoke<number>('export_bib_file', { itemIds, path })
+  }
+
   return {
     // state
     items, displayItems, loading, error, collections, tags, filterQuery,
@@ -259,5 +278,7 @@ export function useLibrary() {
     addItemToCollection, removeItemFromCollection, getItemCollectionIds,
     // tags
     loadTags, createTag, updateTagColor, deleteTag, setItemTags,
+    // import / export
+    importBibFile, exportBibFile,
   }
 }

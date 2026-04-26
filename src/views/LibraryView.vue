@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
-import { useLibrary, type LibraryItem } from '../composables/useLibrary'
+import { invoke } from '@tauri-apps/api/core'
+import { useLibrary, type LibraryItem, type ImportResult } from '../composables/useLibrary'
 import LibraryEntryForm from '../components/LibraryEntryForm.vue'
 import CollectionsSidebar from '../components/CollectionsSidebar.vue'
 
@@ -9,6 +10,7 @@ const {
   loadItems, loadCollections, loadTags, applyFilter,
   deleteItem, createItem,
   addItemToCollection, removeItemFromCollection, getItemCollectionIds,
+  importBibFile, exportBibFile,
 } = useLibrary()
 
 onMounted(() => {
@@ -102,6 +104,62 @@ function clearFilters() {
     tagName: filterQuery.value.tagName,
   }
   applyFilter()
+}
+
+// ── Import ────────────────────────────────────────────────────────────────────
+
+const importOpen       = ref(false)
+const importFilePath   = ref('')
+const importMode       = ref<'merge' | 'replace'>('merge')
+const importing        = ref(false)
+const importResult     = ref<ImportResult | null>(null)
+const importError      = ref('')
+
+async function pickImportFile() {
+  const p = await invoke<string | null>('pick_import_bib')
+  if (p) {
+    importFilePath.value = p
+    importResult.value = null
+    importError.value = ''
+  }
+}
+
+async function doImport() {
+  if (!importFilePath.value) return
+  importing.value = true
+  importError.value = ''
+  try {
+    importResult.value = await importBibFile(importFilePath.value, importMode.value)
+  } catch (e) {
+    importError.value = String(e)
+  } finally {
+    importing.value = false
+  }
+}
+
+function closeImport() {
+  importOpen.value  = false
+  importFilePath.value = ''
+  importResult.value = null
+  importError.value = ''
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+
+const exportingAll = ref(false)
+
+async function doExport() {
+  const p = await invoke<string | null>('pick_export_bib')
+  if (!p) return
+  exportingAll.value = true
+  try {
+    const ids = hasActiveFilter.value || filterQuery.value.collectionId || filterQuery.value.tagName
+      ? displayItems.value.map(i => i.id)
+      : []
+    await exportBibFile(ids, p)
+  } finally {
+    exportingAll.value = false
+  }
 }
 
 // ── Detail panel ──────────────────────────────────────────────────────────────
@@ -261,6 +319,20 @@ const countLabel = computed(() => {
               </svg>
             </button>
           </div>
+          <button class="toolbar-btn" @click="importOpen = true" title="Import .bib file">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 1v7M3 5l3 3 3-3"/>
+              <path d="M2 10h8"/>
+            </svg>
+            Import
+          </button>
+          <button class="toolbar-btn" @click="doExport" :disabled="exportingAll" title="Export .bib file">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 8V1M3 4l3-3 3 3"/>
+              <path d="M2 10h8"/>
+            </svg>
+            Export
+          </button>
           <button class="add-btn" @click="openAddForm" title="Add entry">
             <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="5.5" y1="1" x2="5.5" y2="10"/>
@@ -522,6 +594,51 @@ const countLabel = computed(() => {
     @saved="onFormSaved"
   />
 
+  <!-- Import modal -->
+  <Teleport to="body">
+    <div class="confirm-backdrop" v-if="importOpen" @click.self="closeImport">
+      <div class="confirm-dialog import-dialog">
+        <p class="confirm-msg">Import .bib file</p>
+
+        <div class="import-file-row">
+          <span class="import-path">{{ importFilePath || 'No file selected' }}</span>
+          <button class="fs-btn secondary" @click="pickImportFile">Browse…</button>
+        </div>
+
+        <div class="import-mode">
+          <label class="mode-label">
+            <input type="radio" v-model="importMode" value="merge" />
+            <span>Merge — skip entries with duplicate keys</span>
+          </label>
+          <label class="mode-label">
+            <input type="radio" v-model="importMode" value="replace" />
+            <span>Replace — overwrite existing entries by key</span>
+          </label>
+        </div>
+
+        <div class="import-result" v-if="importResult">
+          <span class="result-added">{{ importResult.added }} added</span>
+          <span class="result-skipped" v-if="importResult.skipped > 0">· {{ importResult.skipped }} skipped</span>
+          <span class="result-errors"  v-if="importResult.errors.length > 0">· {{ importResult.errors.length }} errors</span>
+        </div>
+
+        <p class="fetch-error" v-if="importError" style="margin:8px 0 0">{{ importError }}</p>
+
+        <div class="confirm-actions" style="margin-top:16px">
+          <button class="fs-btn secondary" @click="closeImport">
+            {{ importResult ? 'Done' : 'Cancel' }}
+          </button>
+          <button
+            class="fs-btn primary"
+            :disabled="!importFilePath || importing"
+            @click="doImport"
+            v-if="!importResult"
+          >{{ importing ? 'Importing…' : 'Import' }}</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
   <!-- Delete confirmation -->
   <Teleport to="body">
     <div class="confirm-backdrop" v-if="confirmingDelete" @click.self="confirmingDelete = null">
@@ -636,6 +753,25 @@ const countLabel = computed(() => {
   transition: color var(--t);
 }
 .search-clear:hover { color: var(--text); }
+
+.toolbar-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  background: none;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: background var(--t), color var(--t);
+}
+.toolbar-btn:hover:not(:disabled) { background: var(--bg-chrome-active); color: var(--text); }
+.toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .add-btn {
   flex-shrink: 0;
@@ -1179,6 +1315,74 @@ const countLabel = computed(() => {
 .fs-btn.secondary:hover { opacity: 0.8; }
 .fs-btn.danger { background: #C0392B; color: #fff; }
 .fs-btn.danger:hover { opacity: 0.88; }
+.fs-btn.primary { background: var(--accent); color: #fff; }
+.fs-btn.primary:hover { opacity: 0.88; }
+.fs-btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Import dialog ──────────────────────────────────────────────────────────── */
+
+.import-dialog {
+  max-width: 420px;
+}
+
+.import-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.import-path {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--bg-chrome);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  min-width: 0;
+}
+
+.import-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.mode-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.mode-label input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+.import-result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #16963F18;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.result-added   { color: #16963F; }
+.result-skipped { color: var(--text-secondary); }
+.result-errors  { color: var(--accent-orange); }
+
+.fetch-error { font-size: 11.5px; color: var(--accent-orange); }
 
 /* ── Transition ────────────────────────────────────────────────────────────── */
 
