@@ -2,7 +2,7 @@
 import { ref, watch, computed } from 'vue'
 import { useLibrary, type LibraryItem, type ItemInput } from '../composables/useLibrary'
 
-const { createItem, updateItem } = useLibrary()
+const { createItem, updateItem, tags, displayItems, createTag, setItemTags } = useLibrary()
 
 const props = defineProps<{
   editItem?: LibraryItem | null
@@ -39,6 +39,49 @@ const note      = ref('')
 const saving   = ref(false)
 const keyError = ref('')
 let autoKey    = '' // tracks last auto-generated key to detect user override
+
+// ── Tags ──────────────────────────────────────────────────────────────────────
+
+const selectedTagIds = ref<number[]>([])
+const newTagInput = ref('')
+const TAG_COLORS = ['#0A5FBF', '#16963F', '#E8650A', '#7C3AED', '#C0392B', '#A5A4A2']
+
+watch(tags, (newTags) => {
+  if (props.editItem && selectedTagIds.value.length === 0 && props.editItem.tags.length > 0) {
+    selectedTagIds.value = newTags
+      .filter(t => props.editItem!.tags.includes(t.name))
+      .map(t => t.id)
+  }
+}, { immediate: true })
+
+function toggleTag(id: number) {
+  const idx = selectedTagIds.value.indexOf(id)
+  if (idx === -1) selectedTagIds.value = [...selectedTagIds.value, id]
+  else selectedTagIds.value = selectedTagIds.value.filter(i => i !== id)
+}
+
+async function addNewTag() {
+  const name = newTagInput.value.trim()
+  if (!name) return
+  const existing = tags.value.find(t => t.name.toLowerCase() === name.toLowerCase())
+  if (existing) {
+    if (!selectedTagIds.value.includes(existing.id)) {
+      selectedTagIds.value = [...selectedTagIds.value, existing.id]
+    }
+  } else {
+    const color = TAG_COLORS[tags.value.length % TAG_COLORS.length]
+    const created = await createTag(name, color)
+    selectedTagIds.value = [...selectedTagIds.value, created.id]
+  }
+  newTagInput.value = ''
+}
+
+function onTagInputKey(e: KeyboardEvent) {
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault()
+    addNewTag()
+  }
+}
 
 function fillFrom(item: LibraryItem) {
   entryType.value    = item.entryType
@@ -144,7 +187,9 @@ async function save() {
     const result = isEdit.value
       ? await updateItem(props.editItem!.id, input)
       : await createItem(input)
-    emit('saved', result)
+    await setItemTags(result.id, selectedTagIds.value)
+    const freshItem = displayItems.value.find(i => i.id === result.id) ?? result
+    emit('saved', freshItem)
   } catch (e: unknown) {
     const msg = String(e)
     if (msg.includes('UNIQUE') || msg.includes('unique')) {
@@ -321,6 +366,42 @@ function onBackdropClick(e: MouseEvent) {
           <div class="fs-field-row">
             <label class="fs-label" for="ef-note">Note</label>
             <input id="ef-note" v-model="note" class="fs-input" placeholder="Miscellaneous note" />
+          </div>
+
+          <!-- Tags -->
+          <div class="fs-field-row fs-field-tags">
+            <label class="fs-label">Tags</label>
+            <div class="tag-section">
+              <div class="tag-chips" v-if="tags.length > 0">
+                <button
+                  v-for="tag in tags"
+                  :key="tag.id"
+                  class="tag-chip-btn"
+                  :class="{ selected: selectedTagIds.includes(tag.id) }"
+                  :style="selectedTagIds.includes(tag.id) ? {
+                    background: tag.color + '22',
+                    color: tag.color,
+                    borderColor: tag.color + '77',
+                  } : {}"
+                  @click="toggleTag(tag.id)"
+                  type="button"
+                >{{ tag.name }}</button>
+              </div>
+              <div class="tag-add-row">
+                <input
+                  v-model="newTagInput"
+                  class="fs-input tag-input"
+                  placeholder="New tag name…"
+                  @keydown="onTagInputKey"
+                />
+                <button
+                  class="tag-add-confirm"
+                  type="button"
+                  @click="addNewTag"
+                  :disabled="!newTagInput.trim()"
+                >Add</button>
+              </div>
+            </div>
           </div>
 
         </div>
@@ -567,4 +648,71 @@ function onBackdropClick(e: MouseEvent) {
 }
 .fs-btn.primary:hover { opacity: 0.88; }
 .fs-btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Tags section */
+.fs-field-tags {
+  align-items: flex-start;
+  padding-top: 4px;
+}
+
+.tag-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag-chip-btn {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border-medium);
+  border-radius: 12px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  background: none;
+  color: var(--text-secondary);
+  transition: background var(--t), color var(--t), border-color var(--t);
+}
+
+.tag-chip-btn:hover {
+  background: var(--bg-chrome-active);
+  color: var(--text);
+}
+
+.tag-add-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.tag-input {
+  flex: 1;
+  height: 28px;
+}
+
+.tag-add-confirm {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  background: var(--bg-chrome-active);
+  color: var(--text-secondary);
+  transition: opacity var(--t);
+  flex-shrink: 0;
+}
+
+.tag-add-confirm:hover { opacity: 0.8; }
+.tag-add-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

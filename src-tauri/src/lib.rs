@@ -1,7 +1,13 @@
 mod library;
 pub use library::{
+    // items
     create_library_item, delete_library_item, get_library_item, get_library_items,
     search_library_items, update_library_item,
+    // collections
+    add_item_to_collection, create_collection, delete_collection, get_collections,
+    get_item_collection_ids, remove_item_from_collection, rename_collection,
+    // tags
+    create_tag, delete_tag, get_tags, set_item_tags, update_tag_color,
 };
 
 use serde::{Deserialize, Serialize};
@@ -604,13 +610,27 @@ pub fn run() {
             load_bib,
             find_bib_for_document,
             run_quarto,
-            // Library (SQLite)
+            // Library — items
             get_library_items,
             get_library_item,
             create_library_item,
             update_library_item,
             delete_library_item,
             search_library_items,
+            // Library — collections
+            get_collections,
+            create_collection,
+            rename_collection,
+            delete_collection,
+            add_item_to_collection,
+            remove_item_from_collection,
+            get_item_collection_ids,
+            // Library — tags
+            get_tags,
+            create_tag,
+            update_tag_color,
+            delete_tag,
+            set_item_tags,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

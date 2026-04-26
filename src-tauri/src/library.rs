@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -73,6 +73,26 @@ pub struct SearchQuery {
     pub year_min: Option<String>,
     pub year_max: Option<String>,
     pub has_doi: Option<bool>,
+    pub collection_id: Option<i64>,
+    pub tag_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Collection {
+    pub id: i64,
+    pub name: String,
+    pub parent_id: Option<i64>,
+    pub created_at: i64,
+    pub item_count: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub id: i64,
+    pub name: String,
+    pub color: String,
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -164,6 +184,12 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
 }
 
 fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<LibraryItem> {
+    let tag_csv: String = row.get(25)?;
+    let tags: Vec<String> = tag_csv
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
     Ok(LibraryItem {
         id:            row.get(0)?,
         key:           row.get(1)?,
@@ -190,21 +216,25 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<LibraryItem> {
         institution:   row.get(22)?,
         added_at:      row.get(23)?,
         updated_at:    row.get(24)?,
-        tags:          vec![],
+        tags,
     })
 }
 
+const ITEM_SELECT: &str =
+    "SELECT i.id, i.key, i.entry_type, i.title, i.authors, i.year, i.journal, i.doi,
+            i.abstract_text, i.url, i.volume, i.issue, i.pages, i.publisher, i.booktitle,
+            i.edition, i.month, i.keywords, i.note, i.isbn, i.issn, i.number, i.institution,
+            i.added_at, i.updated_at,
+            COALESCE(GROUP_CONCAT(DISTINCT t.name), '') as tag_names
+     FROM items i
+     LEFT JOIN item_tags it ON it.item_id = i.id
+     LEFT JOIN tags t ON t.id = it.tag_id";
+
 fn fetch_item(conn: &Connection, id: i64) -> Result<Option<LibraryItem>, String> {
-    conn.query_row(
-        "SELECT id, key, entry_type, title, authors, year, journal, doi, abstract_text, url,
-                volume, issue, pages, publisher, booktitle, edition, month, keywords, note,
-                isbn, issn, number, institution, added_at, updated_at
-         FROM items WHERE id=?1",
-        [id],
-        |row| row_to_item(row),
-    )
-    .optional()
-    .map_err(|e| e.to_string())
+    let sql = format!("{} WHERE i.id=?1 GROUP BY i.id", ITEM_SELECT);
+    conn.query_row(&sql, [id], |row| row_to_item(row))
+        .optional()
+        .map_err(|e| e.to_string())
 }
 
 // ── Migration helpers ─────────────────────────────────────────────────────────
@@ -274,13 +304,11 @@ fn items_to_bib(items: &[LibraryItem]) -> String {
 }
 
 fn regenerate_bib(conn: &Connection) -> Result<(), String> {
-    let mut stmt = conn.prepare(
-        "SELECT id, key, entry_type, title, authors, year, journal, doi, abstract_text, url,
-                volume, issue, pages, publisher, booktitle, edition, month, keywords, note,
-                isbn, issn, number, institution, added_at, updated_at
-         FROM items WHERE id NOT IN (SELECT item_id FROM trash) ORDER BY added_at ASC",
-    )
-    .map_err(|e| e.to_string())?;
+    let sql = format!(
+        "{} WHERE i.id NOT IN (SELECT item_id FROM trash) GROUP BY i.id ORDER BY i.added_at ASC",
+        ITEM_SELECT
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let items: Vec<LibraryItem> = stmt
         .query_map([], |row| row_to_item(row))
         .map_err(|e| e.to_string())?
@@ -309,14 +337,11 @@ pub fn init_library(bib_entries: &[BibEntry]) {
 #[tauri::command]
 pub fn get_library_items() -> Result<Vec<LibraryItem>, String> {
     let conn = open_conn()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, key, entry_type, title, authors, year, journal, doi, abstract_text, url,
-                    volume, issue, pages, publisher, booktitle, edition, month, keywords, note,
-                    isbn, issn, number, institution, added_at, updated_at
-             FROM items WHERE id NOT IN (SELECT item_id FROM trash) ORDER BY added_at DESC",
-        )
-        .map_err(|e| e.to_string())?;
+    let sql = format!(
+        "{} WHERE i.id NOT IN (SELECT item_id FROM trash) GROUP BY i.id ORDER BY i.added_at DESC",
+        ITEM_SELECT
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let items = stmt
         .query_map([], |row| row_to_item(row))
         .map_err(|e| e.to_string())?
@@ -397,63 +422,268 @@ pub fn delete_library_item(id: i64) -> Result<(), String> {
 pub fn search_library_items(query: SearchQuery) -> Result<Vec<LibraryItem>, String> {
     let conn = open_conn()?;
 
-    let mut conditions = vec!["id NOT IN (SELECT item_id FROM trash)".to_string()];
-    let mut bind_strs: Vec<String> = vec![];
+    let mut conditions = vec!["i.id NOT IN (SELECT item_id FROM trash)".to_string()];
+    let mut binds: Vec<Value> = vec![];
 
     if let Some(ref text) = query.text {
         if !text.is_empty() {
-            let n = bind_strs.len() + 1;
+            let n = binds.len() + 1;
             conditions.push(format!(
-                "(title LIKE ?{n} OR authors LIKE ?{n} OR key LIKE ?{n} OR abstract_text LIKE ?{n})"
+                "(i.title LIKE ?{n} OR i.authors LIKE ?{n} OR i.key LIKE ?{n} OR i.abstract_text LIKE ?{n})"
             ));
-            bind_strs.push(format!("%{}%", text));
+            binds.push(Value::Text(format!("%{}%", text)));
         }
     }
 
     if let Some(ref min) = query.year_min {
-        let n = bind_strs.len() + 1;
-        conditions.push(format!("year >= ?{n}"));
-        bind_strs.push(min.clone());
+        let n = binds.len() + 1;
+        conditions.push(format!("i.year >= ?{n}"));
+        binds.push(Value::Text(min.clone()));
     }
 
     if let Some(ref max) = query.year_max {
-        let n = bind_strs.len() + 1;
-        conditions.push(format!("year <= ?{n}"));
-        bind_strs.push(max.clone());
+        let n = binds.len() + 1;
+        conditions.push(format!("i.year <= ?{n}"));
+        binds.push(Value::Text(max.clone()));
     }
 
     if let Some(true) = query.has_doi {
-        conditions.push("doi IS NOT NULL AND doi != ''".to_string());
+        conditions.push("i.doi IS NOT NULL AND i.doi != ''".to_string());
     }
 
     if let Some(ref types) = query.entry_types {
         if !types.is_empty() {
-            let start = bind_strs.len() + 1;
-            let placeholders: Vec<String> = (start..start + types.len())
-                .map(|i| format!("?{i}"))
-                .collect();
-            conditions.push(format!("entry_type IN ({})", placeholders.join(",")));
-            bind_strs.extend(types.iter().cloned());
+            let start = binds.len() + 1;
+            let placeholders: Vec<String> =
+                (start..start + types.len()).map(|i| format!("?{i}")).collect();
+            conditions.push(format!("i.entry_type IN ({})", placeholders.join(",")));
+            for t in types {
+                binds.push(Value::Text(t.clone()));
+            }
+        }
+    }
+
+    if let Some(coll_id) = query.collection_id {
+        let n = binds.len() + 1;
+        conditions.push(format!(
+            "i.id IN (SELECT item_id FROM collection_items WHERE collection_id = ?{n})"
+        ));
+        binds.push(Value::Integer(coll_id));
+    }
+
+    if let Some(ref tag) = query.tag_name {
+        if !tag.is_empty() {
+            let n = binds.len() + 1;
+            conditions.push(format!(
+                "i.id IN (SELECT it2.item_id FROM item_tags it2 JOIN tags t2 ON t2.id=it2.tag_id WHERE t2.name=?{n})"
+            ));
+            binds.push(Value::Text(tag.clone()));
         }
     }
 
     let sql = format!(
-        "SELECT id, key, entry_type, title, authors, year, journal, doi, abstract_text, url,
-                volume, issue, pages, publisher, booktitle, edition, month, keywords, note,
-                isbn, issn, number, institution, added_at, updated_at
-         FROM items WHERE {} ORDER BY added_at DESC",
+        "SELECT i.id, i.key, i.entry_type, i.title, i.authors, i.year, i.journal, i.doi,
+                i.abstract_text, i.url, i.volume, i.issue, i.pages, i.publisher, i.booktitle,
+                i.edition, i.month, i.keywords, i.note, i.isbn, i.issn, i.number, i.institution,
+                i.added_at, i.updated_at,
+                COALESCE(GROUP_CONCAT(DISTINCT t.name), '') as tag_names
+         FROM items i
+         LEFT JOIN item_tags it ON it.item_id = i.id
+         LEFT JOIN tags t ON t.id = it.tag_id
+         WHERE {}
+         GROUP BY i.id ORDER BY i.added_at DESC",
         conditions.join(" AND ")
     );
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let refs: Vec<&dyn rusqlite::types::ToSql> = bind_strs
-        .iter()
-        .map(|s| s as &dyn rusqlite::types::ToSql)
-        .collect();
+    let refs: Vec<&dyn rusqlite::types::ToSql> =
+        binds.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
     let items = stmt
         .query_map(refs.as_slice(), |row| row_to_item(row))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(items)
+}
+
+// ── Collection commands ───────────────────────────────────────────────────────
+
+fn row_to_collection(row: &rusqlite::Row) -> rusqlite::Result<Collection> {
+    Ok(Collection {
+        id:         row.get(0)?,
+        name:       row.get(1)?,
+        parent_id:  row.get(2)?,
+        created_at: row.get(3)?,
+        item_count: row.get(4)?,
+    })
+}
+
+#[tauri::command]
+pub fn get_collections() -> Result<Vec<Collection>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, c.name, c.parent_id, c.created_at,
+                    COUNT(DISTINCT ci.item_id) as item_count
+             FROM collections c
+             LEFT JOIN collection_items ci ON ci.collection_id = c.id
+             LEFT JOIN items i ON i.id = ci.item_id
+                 AND i.id NOT IN (SELECT item_id FROM trash)
+             GROUP BY c.id ORDER BY c.name COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let cols = stmt
+        .query_map([], |row| row_to_collection(row))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(cols)
+}
+
+#[tauri::command]
+pub fn create_collection(name: String, parent_id: Option<i64>) -> Result<Collection, String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT INTO collections (name, parent_id) VALUES (?1, ?2)",
+        params![name, parent_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    conn.query_row(
+        "SELECT id, name, parent_id, created_at, 0 FROM collections WHERE id=?1",
+        [id],
+        |row| row_to_collection(row),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_collection(id: i64, name: String) -> Result<Collection, String> {
+    let conn = open_conn()?;
+    conn.execute("UPDATE collections SET name=?1 WHERE id=?2", params![name, id])
+        .map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT c.id, c.name, c.parent_id, c.created_at,
+                COUNT(DISTINCT ci.item_id) as item_count
+         FROM collections c
+         LEFT JOIN collection_items ci ON ci.collection_id = c.id
+         WHERE c.id=?1 GROUP BY c.id",
+        [id],
+        |row| row_to_collection(row),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_collection(id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("DELETE FROM collections WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_item_to_collection(collection_id: i64, item_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO collection_items (collection_id, item_id) VALUES (?1, ?2)",
+        params![collection_id, item_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_item_from_collection(collection_id: i64, item_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "DELETE FROM collection_items WHERE collection_id=?1 AND item_id=?2",
+        params![collection_id, item_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_item_collection_ids(item_id: i64) -> Result<Vec<i64>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare("SELECT collection_id FROM collection_items WHERE item_id=?1")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([item_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<i64>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
+}
+
+// ── Tag commands ──────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_tags() -> Result<Vec<Tag>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, color FROM tags ORDER BY name COLLATE NOCASE")
+        .map_err(|e| e.to_string())?;
+    let tags = stmt
+        .query_map([], |row| {
+            Ok(Tag { id: row.get(0)?, name: row.get(1)?, color: row.get(2)? })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(tags)
+}
+
+#[tauri::command]
+pub fn create_tag(name: String, color: String) -> Result<Tag, String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO tags (name, color) VALUES (?1, ?2)",
+        params![name, color],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, name, color FROM tags WHERE name=?1",
+        [&name],
+        |row| Ok(Tag { id: row.get(0)?, name: row.get(1)?, color: row.get(2)? }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_tag_color(id: i64, color: String) -> Result<Tag, String> {
+    let conn = open_conn()?;
+    conn.execute("UPDATE tags SET color=?1 WHERE id=?2", params![color, id])
+        .map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, name, color FROM tags WHERE id=?1",
+        [id],
+        |row| Ok(Tag { id: row.get(0)?, name: row.get(1)?, color: row.get(2)? }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_tag(id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("DELETE FROM tags WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_item_tags(item_id: i64, tag_ids: Vec<i64>) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("DELETE FROM item_tags WHERE item_id=?1", [item_id])
+        .map_err(|e| e.to_string())?;
+    for tag_id in tag_ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?1, ?2)",
+            params![item_id, tag_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
