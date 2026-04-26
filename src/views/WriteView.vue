@@ -425,7 +425,6 @@ function openOrcid(orcid: string) {
             :class="{ 'focus-active': focusMode }"
             @click="toggleFocusMode"
             :title="focusMode ? 'Exit focus mode (F11)' : 'Focus mode (F11)'"
-            style="margin-left: auto"
           >
             <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="7" cy="7" r="2.5"/>
@@ -752,28 +751,25 @@ function openOrcid(orcid: string) {
 .meta-trigger {
   background: none;
   border: none;
-  padding: 2px 4px;
+  padding: 3px 5px;
   cursor: pointer;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
-  opacity: 0;
+  opacity: 0.55;
   transition: opacity var(--t), background var(--t), color var(--t);
 }
 
-.paper-eyebrow:hover .meta-trigger {
+.meta-trigger:hover {
   opacity: 1;
+  background: var(--bg-chrome-active);
+  color: var(--text-secondary);
 }
 
 .meta-trigger.focus-active {
   opacity: 1;
   color: var(--accent-purple, #7C3AED);
-}
-
-.meta-trigger:hover {
-  background: var(--bg-chrome-active);
-  color: var(--text-secondary);
 }
 
 .meta-trigger.focus-active:hover {
