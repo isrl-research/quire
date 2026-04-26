@@ -939,25 +939,42 @@ pub async fn fetch_doi_metadata(doi: String) -> Result<FetchedMetadata, String> 
 
     let client = reqwest::Client::builder()
         .user_agent("Quire/1.0 (https://github.com/quire)")
-        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
 
     // Try CrossRef first (covers most journal articles and arXiv DOIs)
-    let cr_url = format!("https://api.crossref.org/works/{clean}");
-    if let Ok(resp) = client.get(&cr_url).send().await {
+    let cr_url = format!("https://api.crossref.org/works/{}", clean);
+    let cr_result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        client.get(&cr_url).send(),
+    ).await;
+    if let Ok(Ok(resp)) = cr_result {
         if resp.status().is_success() {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
+            let json_result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                resp.json::<serde_json::Value>(),
+            ).await;
+            if let Ok(Ok(json)) = json_result {
                 return Ok(parse_crossref_message(&json["message"], &clean));
             }
         }
     }
 
     // Fallback: DataCite API (covers Zenodo, figshare, etc.)
-    let dc_url = format!("https://api.datacite.org/dois/{clean}");
-    if let Ok(resp) = client.get(&dc_url).send().await {
+    let dc_url = format!("https://api.datacite.org/dois/{}", clean);
+    let dc_result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        client.get(&dc_url).send(),
+    ).await;
+    if let Ok(Ok(resp)) = dc_result {
         if resp.status().is_success() {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
+            let json_result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                resp.json::<serde_json::Value>(),
+            ).await;
+            if let Ok(Ok(json)) = json_result {
                 return Ok(parse_datacite_attrs(&json["data"]["attributes"], &clean));
             }
         }
@@ -978,12 +995,22 @@ pub async fn fetch_arxiv_metadata(arxiv_id: String) -> Result<FetchedMetadata, S
     let url = format!("https://export.arxiv.org/api/query?id_list={clean}");
     let client = reqwest::Client::builder()
         .user_agent("Quire/1.0")
-        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    let xml = client.get(&url).send().await
-        .map_err(|e| format!("Network error: {e}"))?
-        .text().await.map_err(|e| e.to_string())?;
+    let send_result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        client.get(&url).send(),
+    ).await
+    .map_err(|_| "arXiv request timed out — check your internet connection.".to_string())?
+    .map_err(|e| format!("Network error: {e}"))?;
+    let xml = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        send_result.text(),
+    ).await
+    .map_err(|_| "arXiv response timed out.".to_string())?
+    .map_err(|e| e.to_string())?;
 
     if xml.contains("<opensearch:totalResults>0</opensearch:totalResults>") {
         return Err("arXiv ID not found".to_string());
@@ -1029,12 +1056,22 @@ pub async fn fetch_isbn_metadata(isbn: String) -> Result<FetchedMetadata, String
     );
     let client = reqwest::Client::builder()
         .user_agent("Quire/1.0")
-        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    let json: serde_json::Value = client.get(&url).send().await
-        .map_err(|e| format!("Network error: {e}"))?
-        .json().await.map_err(|e| e.to_string())?;
+    let send_result = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        client.get(&url).send(),
+    ).await
+    .map_err(|_| "OpenLibrary request timed out — check your internet connection.".to_string())?
+    .map_err(|e| format!("Network error: {e}"))?;
+    let json: serde_json::Value = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        send_result.json(),
+    ).await
+    .map_err(|_| "OpenLibrary response timed out.".to_string())?
+    .map_err(|e| e.to_string())?;
 
     let key  = format!("ISBN:{clean}");
     let book = json.get(&key).ok_or("ISBN not found in OpenLibrary")?;
