@@ -257,6 +257,8 @@ async function handleKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
+  // Imperative scroll listener — more reliable than @scroll on the template ref
+  documentAreaRef.value?.addEventListener('scroll', onDocScroll, { passive: true })
 
   // Load content when a file is opened from the hamburger menu or file ops
   emitter.on('doc:opened', ({ content }) => {
@@ -295,6 +297,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
+  documentAreaRef.value?.removeEventListener('scroll', onDocScroll)
   emitter.off('doc:opened')
   emitter.off('cite:hover')
   emitter.off('cite:leave')
@@ -346,34 +349,39 @@ const documentAreaRef = ref<HTMLElement | null>(null)
 function toggleFocusMode() {
   focusMode.value = !focusMode.value
   if (focusMode.value) {
-    // Run once immediately so the current scroll position is reflected
     updateDocAbove()
   } else {
     clearDocAbove()
   }
 }
 
+function getProseMirror(): HTMLElement | null {
+  return documentAreaRef.value?.querySelector('.ProseMirror') as HTMLElement | null
+}
+
 function updateDocAbove() {
   const root = documentAreaRef.value
-  if (!root) return
-  const pm = root.querySelector('.ProseMirror') as HTMLElement | null
-  if (!pm) return
+  const pm = getProseMirror()
+  if (!root || !pm) return
   const rootRect = root.getBoundingClientRect()
-  // Dim blocks whose bottom enters the top 30 % of the scroll container viewport.
-  // ~200 px of scroll on a typical screen triggers the first fade.
+  // Fade blocks whose bottom crosses into the top 30% of the scroll container.
   const threshold = rootRect.top + rootRect.height * 0.3
   Array.from(pm.children).forEach(child => {
-    const bottom = (child as HTMLElement).getBoundingClientRect().bottom
-    if (bottom < threshold) {
-      child.classList.add('doc-above')
-    } else {
-      child.classList.remove('doc-above')
-    }
+    const el = child as HTMLElement
+    const below = el.getBoundingClientRect().bottom >= threshold
+    el.style.opacity = below ? '' : '0.2'
+    el.style.transition = 'opacity 0.4s ease'
   })
 }
 
 function clearDocAbove() {
-  document.querySelectorAll('.doc-above').forEach(el => el.classList.remove('doc-above'))
+  const pm = getProseMirror()
+  if (!pm) return
+  Array.from(pm.children).forEach(child => {
+    const el = child as HTMLElement
+    el.style.opacity = ''
+    el.style.transition = ''
+  })
 }
 
 function onDocScroll() {
@@ -414,7 +422,6 @@ function openOrcid(orcid: string) {
       class="document-area"
       :class="{ 'focus-mode': focusMode }"
       ref="documentAreaRef"
-      @scroll.passive="onDocScroll"
     >
       <div class="paper">
         <!-- Paper header -->
