@@ -939,6 +939,7 @@ pub async fn fetch_doi_metadata(doi: String) -> Result<FetchedMetadata, String> 
 
     let client = reqwest::Client::builder()
         .user_agent("Quire/1.0 (https://github.com/quire)")
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -975,7 +976,12 @@ pub async fn fetch_arxiv_metadata(arxiv_id: String) -> Result<FetchedMetadata, S
     let clean = raw.split('v').next().unwrap_or(raw).trim();
 
     let url = format!("https://export.arxiv.org/api/query?id_list={clean}");
-    let xml = reqwest::get(&url).await
+    let client = reqwest::Client::builder()
+        .user_agent("Quire/1.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let xml = client.get(&url).send().await
         .map_err(|e| format!("Network error: {e}"))?
         .text().await.map_err(|e| e.to_string())?;
 
@@ -1021,7 +1027,12 @@ pub async fn fetch_isbn_metadata(isbn: String) -> Result<FetchedMetadata, String
     let url = format!(
         "https://openlibrary.org/api/books?bibkeys=ISBN:{clean}&format=json&jscmd=data"
     );
-    let json: serde_json::Value = reqwest::get(&url).await
+    let client = reqwest::Client::builder()
+        .user_agent("Quire/1.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = client.get(&url).send().await
         .map_err(|e| format!("Network error: {e}"))?
         .json().await.map_err(|e| e.to_string())?;
 
