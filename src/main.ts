@@ -4,6 +4,7 @@ import App from "./App.vue";
 import WriteView from "./views/WriteView.vue";
 import WorkbenchView from "./views/WorkbenchView.vue";
 import PdfView from "./views/PdfView.vue";
+import LibraryView from "./views/LibraryView.vue";
 import "./assets/style.css";
 import "./assets/editor.css";
 
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: "/write", name: "write", component: WriteView },
     { path: "/workbench", name: "workbench", component: WorkbenchView },
     { path: "/pdf", name: "pdf", component: PdfView },
+    { path: "/library", name: "library", component: LibraryView },
   ],
 });
 

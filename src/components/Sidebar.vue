@@ -32,6 +32,19 @@ const route = useRoute()
       </router-link>
 
       <router-link
+        to="/library"
+        class="nav-item"
+        :class="{ active: route.name === 'library' }"
+        title="Library"
+      >
+        <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 2.5h2.5v12H3z"/>
+          <path d="M7 2.5h2.5v12H7z"/>
+          <path d="M11.5 2.5l2.4.9-4.4 11.4-2.4-.9z"/>
+        </svg>
+      </router-link>
+
+      <router-link
         to="/pdf"
         class="nav-item"
         :class="{ active: route.name === 'pdf' }"
