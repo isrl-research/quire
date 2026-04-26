@@ -1,3 +1,9 @@
+mod library;
+pub use library::{
+    create_library_item, delete_library_item, get_library_item, get_library_items,
+    search_library_items, update_library_item,
+};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -17,6 +23,19 @@ pub struct BibEntry {
     pub doi: Option<String>,
     pub abstract_text: Option<String>,
     pub url: Option<String>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub pages: Option<String>,
+    pub publisher: Option<String>,
+    pub booktitle: Option<String>,
+    pub edition: Option<String>,
+    pub month: Option<String>,
+    pub keywords: Option<String>,
+    pub note: Option<String>,
+    pub isbn: Option<String>,
+    pub issn: Option<String>,
+    pub number: Option<String>,
+    pub institution: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -114,6 +133,12 @@ fn setup_quire_dir() {
     if !recent.exists() {
         fs::write(&recent, "[]").ok();
     }
+
+    // Initialise SQLite library; migrate existing .bib on first run
+    let seed_entries = fs::read_to_string(&global_bib_path())
+        .map(|c| parse_bib(&c))
+        .unwrap_or_default();
+    library::init_library(&seed_entries);
 }
 
 // ── Quire dir commands ────────────────────────────────────────────────────────
@@ -410,22 +435,30 @@ fn parse_bib_entry(chars: &[char], i: &mut usize) -> Option<BibEntry> {
     let mut fields: HashMap<String, String> = HashMap::new();
     parse_bib_fields(chars, i, &mut fields);
 
+    let get = |k: &str| fields.get(k).map(|s| clean_bib_braces(s));
     Some(BibEntry {
         key,
         entry_type,
-        title: fields.get("title").map(|s| clean_bib_braces(s)),
-        authors: fields
-            .get("author")
-            .or_else(|| fields.get("authors"))
-            .map(|s| clean_bib_braces(s)),
-        year: fields.get("year").map(|s| clean_bib_braces(s)),
-        journal: fields
-            .get("journal")
-            .or_else(|| fields.get("journaltitle"))
-            .map(|s| clean_bib_braces(s)),
-        doi: fields.get("doi").map(|s| clean_bib_braces(s)),
-        abstract_text: fields.get("abstract").map(|s| clean_bib_braces(s)),
-        url: fields.get("url").map(|s| clean_bib_braces(s)),
+        title:         get("title"),
+        authors:       fields.get("author").or_else(|| fields.get("authors")).map(|s| clean_bib_braces(s)),
+        year:          get("year"),
+        journal:       fields.get("journal").or_else(|| fields.get("journaltitle")).map(|s| clean_bib_braces(s)),
+        doi:           get("doi"),
+        abstract_text: get("abstract"),
+        url:           get("url"),
+        volume:        get("volume"),
+        issue:         get("issue"),
+        pages:         get("pages"),
+        publisher:     get("publisher"),
+        booktitle:     get("booktitle"),
+        edition:       get("edition"),
+        month:         get("month"),
+        keywords:      get("keywords"),
+        note:          get("note"),
+        isbn:          get("isbn"),
+        issn:          get("issn"),
+        number:        get("number"),
+        institution:   get("institution"),
     })
 }
 
@@ -571,6 +604,13 @@ pub fn run() {
             load_bib,
             find_bib_for_document,
             run_quarto,
+            // Library (SQLite)
+            get_library_items,
+            get_library_item,
+            create_library_item,
+            update_library_item,
+            delete_library_item,
+            search_library_items,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -10,6 +10,19 @@ export interface BibEntry {
   doi?: string
   abstractText?: string
   url?: string
+  volume?: string
+  issue?: string
+  pages?: string
+  publisher?: string
+  booktitle?: string
+  edition?: string
+  month?: string
+  keywords?: string
+  note?: string
+  isbn?: string
+  issn?: string
+  number?: string
+  institution?: string
 }
 
 // Module-level singletons — shared across all components without Pinia
