@@ -25,11 +25,23 @@ export interface BibEntry {
   institution?: string
 }
 
+export interface DocAuthor {
+  name: string
+  orcid: string
+  title: string
+  affiliation: string
+}
+
 // Module-level singletons — shared across all components without Pinia
 const filePath = ref<string | null>(null)
 const bibPath = ref<string | null>(null)
 const docTitle = ref('Allergen Labelling Study')
-const docAuthors = ref<string[]>(['Sharma, R.', '[Author]'])
+const docSubtitle = ref('A Cross-Sectional Study of FSSAI Compliance and Consumer Risk Communication')
+const docStatus = ref('Working Draft')
+const docDate = ref('April 2026')
+const docAuthors = ref<DocAuthor[]>([
+  { name: 'Sharma, R.', orcid: '', title: 'PhD Candidate', affiliation: 'Food Policy Studies, IIT Madras' },
+])
 const isDirty = ref(false)
 const lastSaved = ref<Date | null>(null)
 const citations = ref<BibEntry[]>([
@@ -74,6 +86,9 @@ export function useDocument() {
     filePath,
     bibPath,
     docTitle,
+    docSubtitle,
+    docStatus,
+    docDate,
     docAuthors,
     isDirty,
     lastSaved,

@@ -28,12 +28,12 @@ function onClick() {
 
 <template>
   <NodeViewWrapper as="span" class="cite-inline-node">
-    <sup
+    <span
       :class="['cite-sup-node', { 'cite-sup-unresolved': !resolved }]"
       :title="!resolved ? `No entry for '${node.attrs.citeKey}' in references.bib` : undefined"
       @mouseenter="onMouseEnter"
       @mouseleave="onMouseLeave"
       @click.stop="onClick"
-    >{{ resolved ? `[${node.attrs.displayIndex}]` : '[?]' }}</sup>
+    >{{ resolved ? `[${node.attrs.displayIndex}]` : '[?]' }}</span>
   </NodeViewWrapper>
 </template>

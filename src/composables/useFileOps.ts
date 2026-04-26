@@ -17,7 +17,13 @@ export function useFileOps() {
       const result = await invoke<OpenResult>('open_document')
       filePath.value = result.path
       if (result.frontmatter.title) docTitle.value = result.frontmatter.title
-      if (result.frontmatter.authors?.length) docAuthors.value = result.frontmatter.authors
+      if (result.frontmatter.authors?.length) {
+        docAuthors.value = result.frontmatter.authors.map(a =>
+          typeof a === 'string'
+            ? { name: a, orcid: '', title: '', affiliation: '' }
+            : a
+        )
+      }
       isDirty.value = false
       emitter.emit('doc:opened', { path: result.path, content: result.body })
 

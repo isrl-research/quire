@@ -29,7 +29,7 @@ function handleNewDoc() {
   // Reset document state — WriteView listens for doc:opened with empty content
   const doc = useDocument()
   doc.docTitle.value = 'Untitled Document'
-  doc.docAuthors.value = ['[Author]']
+  doc.docAuthors.value = [{ name: '[Author]', orcid: '', title: '', affiliation: '' }]
   doc.filePath.value = null
   doc.isDirty.value = false
   emitter.emit('doc:opened', {

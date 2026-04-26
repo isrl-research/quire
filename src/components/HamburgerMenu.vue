@@ -57,7 +57,11 @@ async function handleRecent(file: RecentFile) {
       { path: file.path }
     )
     if (result.frontmatter.title) doc.docTitle.value = result.frontmatter.title
-    if (result.frontmatter.authors?.length) doc.docAuthors.value = result.frontmatter.authors
+    if (result.frontmatter.authors?.length) {
+      doc.docAuthors.value = result.frontmatter.authors.map((a: any) =>
+        typeof a === 'string' ? { name: a, orcid: '', title: '', affiliation: '' } : a
+      )
+    }
     doc.filePath.value = result.path
     doc.isDirty.value = false
     // Emit the content via events so WriteView can pick it up
