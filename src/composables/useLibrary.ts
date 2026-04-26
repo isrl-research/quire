@@ -30,6 +30,31 @@ export interface LibraryItem {
   tags: string[]
 }
 
+export interface ItemInput {
+  key: string
+  entryType: string
+  title?: string
+  authors?: string
+  year?: string
+  journal?: string
+  doi?: string
+  abstractText?: string
+  url?: string
+  volume?: string
+  issue?: string
+  pages?: string
+  publisher?: string
+  booktitle?: string
+  edition?: string
+  month?: string
+  keywords?: string
+  note?: string
+  isbn?: string
+  issn?: string
+  number?: string
+  institution?: string
+}
+
 export interface SearchQuery {
   text?: string
   entryTypes?: string[]
@@ -66,10 +91,23 @@ export function useLibrary() {
     }
   }
 
+  async function createItem(input: ItemInput): Promise<LibraryItem> {
+    const created = await invoke<LibraryItem>('create_library_item', { item: input })
+    items.value.unshift(created)
+    return created
+  }
+
+  async function updateItem(id: number, input: ItemInput): Promise<LibraryItem> {
+    const updated = await invoke<LibraryItem>('update_library_item', { id, item: input })
+    const idx = items.value.findIndex(i => i.id === id)
+    if (idx !== -1) items.value[idx] = updated
+    return updated
+  }
+
   async function deleteItem(id: number): Promise<void> {
     await invoke('delete_library_item', { id })
     items.value = items.value.filter(i => i.id !== id)
   }
 
-  return { items, loading, error, loadItems, searchItems, deleteItem }
+  return { items, loading, error, loadItems, searchItems, createItem, updateItem, deleteItem }
 }

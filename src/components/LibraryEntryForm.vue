@@ -1,0 +1,570 @@
+<script setup lang="ts">
+import { ref, watch, computed } from 'vue'
+import { useLibrary, type LibraryItem, type ItemInput } from '../composables/useLibrary'
+
+const { createItem, updateItem } = useLibrary()
+
+const props = defineProps<{
+  editItem?: LibraryItem | null
+}>()
+
+const emit = defineEmits<{
+  close: []
+  saved: [item: LibraryItem]
+}>()
+
+// ── Form state ────────────────────────────────────────────────────────────────
+
+const entryType = ref('article')
+const key       = ref('')
+const title     = ref('')
+const authors   = ref('')
+const year      = ref('')
+const journal   = ref('')
+const booktitle = ref('')
+const volume    = ref('')
+const number    = ref('')
+const pages     = ref('')
+const publisher = ref('')
+const institution = ref('')
+const edition   = ref('')
+const doi       = ref('')
+const url       = ref('')
+const isbn      = ref('')
+const issn      = ref('')
+const abstractText = ref('')
+const keywords  = ref('')
+const note      = ref('')
+
+const saving   = ref(false)
+const keyError = ref('')
+let autoKey    = '' // tracks last auto-generated key to detect user override
+
+function fillFrom(item: LibraryItem) {
+  entryType.value    = item.entryType
+  key.value          = item.key
+  title.value        = item.title       ?? ''
+  authors.value      = item.authors     ?? ''
+  year.value         = item.year        ?? ''
+  journal.value      = item.journal     ?? ''
+  booktitle.value    = item.booktitle   ?? ''
+  volume.value       = item.volume      ?? ''
+  number.value       = item.number      ?? ''
+  pages.value        = item.pages       ?? ''
+  publisher.value    = item.publisher   ?? ''
+  institution.value  = item.institution ?? ''
+  edition.value      = item.edition     ?? ''
+  doi.value          = item.doi         ?? ''
+  url.value          = item.url         ?? ''
+  isbn.value         = item.isbn        ?? ''
+  issn.value         = item.issn        ?? ''
+  abstractText.value = item.abstractText ?? ''
+  keywords.value     = item.keywords    ?? ''
+  note.value         = item.note        ?? ''
+}
+
+// Pre-fill when editing
+if (props.editItem) {
+  fillFrom(props.editItem)
+  autoKey = ''
+} else {
+  autoKey = ''
+}
+
+// ── Auto-key generation ───────────────────────────────────────────────────────
+
+function makeAutoKey(authorsStr: string, yearStr: string): string {
+  const firstAuthor = authorsStr.split(/[,&]| and /i)[0].trim()
+  const parts = firstAuthor.split(/\s+/)
+  const lastName = parts[parts.length - 1] ?? firstAuthor
+  const cleaned = lastName.toLowerCase().replace(/[^a-z0-9]/g, '')
+  return cleaned && yearStr ? `${cleaned}${yearStr}` : ''
+}
+
+watch([authors, year], () => {
+  if (props.editItem) return  // don't auto-generate when editing
+  const candidate = makeAutoKey(authors.value, year.value)
+  if (!candidate) return
+  // Only update if key is empty or was last auto-set by us
+  if (key.value === '' || key.value === autoKey) {
+    autoKey = candidate
+    key.value = candidate
+  }
+})
+
+// ── Field visibility per type ─────────────────────────────────────────────────
+
+const showJournal     = computed(() => entryType.value === 'article')
+const showBooktitle   = computed(() => entryType.value === 'inproceedings')
+const showVolNum      = computed(() => ['article', 'book'].includes(entryType.value))
+const showPages       = computed(() => ['article', 'inproceedings'].includes(entryType.value))
+const showPublisher   = computed(() => ['book', 'misc'].includes(entryType.value))
+const showInstitution = computed(() => entryType.value === 'techreport')
+const showEdition     = computed(() => entryType.value === 'book')
+const showIsbn        = computed(() => entryType.value === 'book')
+const showIssn        = computed(() => entryType.value === 'article')
+
+const isEdit = computed(() => !!props.editItem)
+const formTitle = computed(() => isEdit.value ? 'Edit Entry' : 'Add Entry')
+
+// ── Save ──────────────────────────────────────────────────────────────────────
+
+async function save() {
+  keyError.value = ''
+  if (!key.value.trim()) {
+    keyError.value = 'Key is required'
+    return
+  }
+
+  const input: ItemInput = {
+    key:          key.value.trim(),
+    entryType:    entryType.value,
+    title:        title.value      || undefined,
+    authors:      authors.value    || undefined,
+    year:         year.value       || undefined,
+    journal:      journal.value    || undefined,
+    booktitle:    booktitle.value  || undefined,
+    volume:       volume.value     || undefined,
+    number:       number.value     || undefined,
+    pages:        pages.value      || undefined,
+    publisher:    publisher.value  || undefined,
+    institution:  institution.value || undefined,
+    edition:      edition.value    || undefined,
+    doi:          doi.value        || undefined,
+    url:          url.value        || undefined,
+    isbn:         isbn.value       || undefined,
+    issn:         issn.value       || undefined,
+    abstractText: abstractText.value || undefined,
+    keywords:     keywords.value   || undefined,
+    note:         note.value       || undefined,
+  }
+
+  saving.value = true
+  try {
+    const result = isEdit.value
+      ? await updateItem(props.editItem!.id, input)
+      : await createItem(input)
+    emit('saved', result)
+  } catch (e: unknown) {
+    const msg = String(e)
+    if (msg.includes('UNIQUE') || msg.includes('unique')) {
+      keyError.value = 'A key with that name already exists'
+    } else {
+      keyError.value = msg
+    }
+  } finally {
+    saving.value = false
+  }
+}
+
+function onBackdropClick(e: MouseEvent) {
+  if (e.target === e.currentTarget) emit('close')
+}
+</script>
+
+<template>
+  <Teleport to="body">
+    <div class="form-backdrop" @click="onBackdropClick">
+      <div class="form-sheet" role="dialog" :aria-label="formTitle">
+
+        <!-- Header -->
+        <div class="fs-header">
+          <span class="fs-title">{{ formTitle }}</span>
+          <button class="fs-close" @click="emit('close')" title="Close">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+              <line x1="1" y1="1" x2="12" y2="12"/>
+              <line x1="12" y1="1" x2="1" y2="12"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Body -->
+        <div class="fs-body">
+
+          <!-- Entry type row -->
+          <div class="fs-field-row">
+            <label class="fs-label">Type</label>
+            <div class="type-tabs">
+              <button
+                v-for="t in ['article','book','inproceedings','techreport','misc']"
+                :key="t"
+                class="type-tab"
+                :class="{ active: entryType === t }"
+                @click="entryType = t"
+              >{{ t }}</button>
+            </div>
+          </div>
+
+          <!-- Key -->
+          <div class="fs-field-row" :class="{ error: keyError }">
+            <label class="fs-label" for="ef-key">Key <span class="required">*</span></label>
+            <div class="fs-input-wrap">
+              <input
+                id="ef-key"
+                v-model="key"
+                class="fs-input mono"
+                placeholder="e.g. smith2024"
+                autocomplete="off"
+                spellcheck="false"
+                @input="keyError = ''"
+              />
+              <span class="fs-error" v-if="keyError">{{ keyError }}</span>
+            </div>
+          </div>
+
+          <!-- Title -->
+          <div class="fs-field-row">
+            <label class="fs-label" for="ef-title">Title</label>
+            <input id="ef-title" v-model="title" class="fs-input" placeholder="Full title of the work" />
+          </div>
+
+          <!-- Authors -->
+          <div class="fs-field-row">
+            <label class="fs-label" for="ef-authors">Authors</label>
+            <input id="ef-authors" v-model="authors" class="fs-input" placeholder="Last, First and Last, First" />
+          </div>
+
+          <!-- Year -->
+          <div class="fs-field-row">
+            <label class="fs-label" for="ef-year">Year</label>
+            <input id="ef-year" v-model="year" class="fs-input short" placeholder="2024" maxlength="4" />
+          </div>
+
+          <!-- Journal (article only) -->
+          <div class="fs-field-row" v-if="showJournal">
+            <label class="fs-label" for="ef-journal">Journal</label>
+            <input id="ef-journal" v-model="journal" class="fs-input" placeholder="Journal name" />
+          </div>
+
+          <!-- Booktitle (inproceedings only) -->
+          <div class="fs-field-row" v-if="showBooktitle">
+            <label class="fs-label" for="ef-booktitle">Conference</label>
+            <input id="ef-booktitle" v-model="booktitle" class="fs-input" placeholder="Proceedings of..." />
+          </div>
+
+          <!-- Publisher (book, misc) -->
+          <div class="fs-field-row" v-if="showPublisher">
+            <label class="fs-label" for="ef-publisher">Publisher</label>
+            <input id="ef-publisher" v-model="publisher" class="fs-input" placeholder="Publisher name" />
+          </div>
+
+          <!-- Institution (techreport) -->
+          <div class="fs-field-row" v-if="showInstitution">
+            <label class="fs-label" for="ef-inst">Institution</label>
+            <input id="ef-inst" v-model="institution" class="fs-input" placeholder="Issuing institution" />
+          </div>
+
+          <!-- Volume + Number (article, book) -->
+          <div class="fs-field-row" v-if="showVolNum">
+            <label class="fs-label">Vol / No.</label>
+            <div class="fs-inline">
+              <input v-model="volume" class="fs-input short" placeholder="Vol" />
+              <input v-model="number" class="fs-input short" placeholder="No." />
+            </div>
+          </div>
+
+          <!-- Report number (techreport) -->
+          <div class="fs-field-row" v-if="entryType === 'techreport'">
+            <label class="fs-label" for="ef-number">Report No.</label>
+            <input id="ef-number" v-model="number" class="fs-input short" placeholder="Report number" />
+          </div>
+
+          <!-- Pages -->
+          <div class="fs-field-row" v-if="showPages">
+            <label class="fs-label" for="ef-pages">Pages</label>
+            <input id="ef-pages" v-model="pages" class="fs-input short" placeholder="100–115" />
+          </div>
+
+          <!-- Edition (book) -->
+          <div class="fs-field-row" v-if="showEdition">
+            <label class="fs-label" for="ef-edition">Edition</label>
+            <input id="ef-edition" v-model="edition" class="fs-input short" placeholder="2nd" />
+          </div>
+
+          <!-- DOI -->
+          <div class="fs-field-row">
+            <label class="fs-label" for="ef-doi">DOI</label>
+            <input id="ef-doi" v-model="doi" class="fs-input mono" placeholder="10.xxxx/..." />
+          </div>
+
+          <!-- ISBN (book) -->
+          <div class="fs-field-row" v-if="showIsbn">
+            <label class="fs-label" for="ef-isbn">ISBN</label>
+            <input id="ef-isbn" v-model="isbn" class="fs-input mono short" placeholder="978-..." />
+          </div>
+
+          <!-- ISSN (article) -->
+          <div class="fs-field-row" v-if="showIssn">
+            <label class="fs-label" for="ef-issn">ISSN</label>
+            <input id="ef-issn" v-model="issn" class="fs-input mono short" placeholder="1234-5678" />
+          </div>
+
+          <!-- URL -->
+          <div class="fs-field-row">
+            <label class="fs-label" for="ef-url">URL</label>
+            <input id="ef-url" v-model="url" class="fs-input" placeholder="https://..." />
+          </div>
+
+          <!-- Abstract -->
+          <div class="fs-field-row fs-field-tall">
+            <label class="fs-label" for="ef-abs">Abstract</label>
+            <textarea id="ef-abs" v-model="abstractText" class="fs-textarea" placeholder="Abstract text…" rows="4" />
+          </div>
+
+          <!-- Keywords -->
+          <div class="fs-field-row">
+            <label class="fs-label" for="ef-kw">Keywords</label>
+            <input id="ef-kw" v-model="keywords" class="fs-input" placeholder="keyword1, keyword2" />
+          </div>
+
+          <!-- Note -->
+          <div class="fs-field-row">
+            <label class="fs-label" for="ef-note">Note</label>
+            <input id="ef-note" v-model="note" class="fs-input" placeholder="Miscellaneous note" />
+          </div>
+
+        </div>
+
+        <!-- Footer -->
+        <div class="fs-footer">
+          <button class="fs-btn secondary" @click="emit('close')">Cancel</button>
+          <button class="fs-btn primary" @click="save" :disabled="saving">
+            {{ saving ? 'Saving…' : (isEdit ? 'Save Changes' : 'Add Entry') }}
+          </button>
+        </div>
+
+      </div>
+    </div>
+  </Teleport>
+</template>
+
+<style scoped>
+.form-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.form-sheet {
+  background: var(--surface-solid);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-width: 540px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Header */
+.fs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.fs-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.fs-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  transition: background var(--t), color var(--t);
+}
+.fs-close:hover {
+  background: var(--bg-chrome-active);
+  color: var(--text);
+}
+
+/* Body */
+.fs-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fs-field-row {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+}
+
+.fs-field-row.fs-field-tall {
+  align-items: flex-start;
+  padding-top: 4px;
+}
+
+.fs-field-row.error .fs-input {
+  border-color: var(--accent-orange);
+}
+
+.fs-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.required {
+  color: var(--accent-orange);
+}
+
+.fs-input-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fs-error {
+  font-size: 11px;
+  color: var(--accent-orange);
+}
+
+.fs-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--bg);
+  outline: none;
+  transition: border-color var(--t), box-shadow var(--t);
+}
+
+.fs-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2.5px var(--accent-soft);
+}
+
+.fs-input.mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.fs-input.short {
+  width: auto;
+  min-width: 80px;
+  max-width: 140px;
+}
+
+.fs-inline {
+  display: flex;
+  gap: 8px;
+}
+
+.fs-textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-doc);
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--bg);
+  outline: none;
+  resize: vertical;
+  line-height: 1.55;
+  transition: border-color var(--t), box-shadow var(--t);
+}
+
+.fs-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2.5px var(--accent-soft);
+}
+
+/* Type tabs */
+.type-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.type-tab {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  background: var(--bg);
+  color: var(--text-secondary);
+  transition: background var(--t), color var(--t), border-color var(--t);
+}
+
+.type-tab:hover {
+  background: var(--bg-chrome-active);
+  color: var(--text);
+}
+
+.type-tab.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* Footer */
+.fs-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px 14px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.fs-btn {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: opacity var(--t), background var(--t);
+}
+
+.fs-btn.secondary {
+  background: var(--bg-chrome-active);
+  color: var(--text-secondary);
+}
+.fs-btn.secondary:hover { opacity: 0.8; }
+
+.fs-btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+.fs-btn.primary:hover { opacity: 0.88; }
+.fs-btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>

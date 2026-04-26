@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useLibrary, type LibraryItem } from '../composables/useLibrary'
+import LibraryEntryForm from '../components/LibraryEntryForm.vue'
 
-const { items, loading, loadItems } = useLibrary()
+const { items, loading, loadItems, deleteItem, createItem } = useLibrary()
 
 onMounted(loadItems)
 
@@ -46,6 +47,50 @@ function closePanel() {
   activeItem.value = null
 }
 
+// ── Form (add / edit) ─────────────────────────────────────────────────────────
+
+const formOpen = ref(false)
+const formEditItem = ref<LibraryItem | null>(null)
+
+function openAddForm() {
+  formEditItem.value = null
+  formOpen.value = true
+}
+
+function openEditForm(item: LibraryItem) {
+  formEditItem.value = item
+  formOpen.value = true
+}
+
+function onFormSaved(saved: LibraryItem) {
+  formOpen.value = false
+  // If we were editing the active item, refresh it in the panel
+  if (activeItem.value?.id === saved.id) {
+    activeItem.value = saved
+  }
+}
+
+async function duplicateItem(item: LibraryItem) {
+  const { id: _id, addedAt: _a, updatedAt: _u, tags: _t, ...fields } = item
+  await createItem({ ...fields, key: `${item.key}_copy` })
+}
+
+// ── Delete ────────────────────────────────────────────────────────────────────
+
+const confirmingDelete = ref<LibraryItem | null>(null)
+
+function requestDelete(item: LibraryItem) {
+  confirmingDelete.value = item
+}
+
+async function confirmDelete() {
+  if (!confirmingDelete.value) return
+  const id = confirmingDelete.value.id
+  await deleteItem(id)
+  if (activeItem.value?.id === id) closePanel()
+  confirmingDelete.value = null
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const TYPE_COLORS: Record<string, string> = {
@@ -85,6 +130,13 @@ function venue(item: LibraryItem): string {
         <h2 class="lib-title">Library</h2>
         <span class="lib-count" v-if="!loading">{{ items.length }} item{{ items.length !== 1 ? 's' : '' }}</span>
         <span class="lib-count loading" v-else>Loading…</span>
+        <button class="add-btn" @click="openAddForm" title="Add entry">
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="6.5" y1="1" x2="6.5" y2="12"/>
+            <line x1="1" y1="6.5" x2="12" y2="6.5"/>
+          </svg>
+          Add
+        </button>
       </div>
 
       <div class="lib-table-wrap">
@@ -215,9 +267,53 @@ function venue(item: LibraryItem): string {
             <p class="dp-keywords">{{ activeItem.keywords }}</p>
           </div>
         </div>
+
+        <div class="dp-actions">
+          <button class="dp-action-btn" @click="openEditForm(activeItem)" title="Edit entry">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 1.5L11.5 4L5 10.5H2.5V8L9 1.5Z"/>
+            </svg>
+            Edit
+          </button>
+          <button class="dp-action-btn" @click="duplicateItem(activeItem)" title="Duplicate entry">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4.5" y="4.5" width="7" height="7" rx="1"/>
+              <path d="M4.5 8.5H2.5a1 1 0 01-1-1v-5a1 1 0 011-1h5a1 1 0 011 1v2"/>
+            </svg>
+            Duplicate
+          </button>
+          <button class="dp-action-btn danger" @click="requestDelete(activeItem)" title="Delete entry">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 3.5h9M5 3.5V2h3v1.5M5.5 5.5v4M7.5 5.5v4M3 3.5l.5 7h6l.5-7"/>
+            </svg>
+            Delete
+          </button>
+        </div>
       </div>
     </Transition>
   </div>
+
+  <!-- Entry form modal -->
+  <LibraryEntryForm
+    v-if="formOpen"
+    :edit-item="formEditItem"
+    @close="formOpen = false"
+    @saved="onFormSaved"
+  />
+
+  <!-- Delete confirmation -->
+  <Teleport to="body">
+    <div class="confirm-backdrop" v-if="confirmingDelete" @click.self="confirmingDelete = null">
+      <div class="confirm-dialog">
+        <p class="confirm-msg">Delete <strong>{{ confirmingDelete.key }}</strong>?</p>
+        <p class="confirm-sub">This will remove the entry from your library and cannot be undone.</p>
+        <div class="confirm-actions">
+          <button class="fs-btn secondary" @click="confirmingDelete = null">Cancel</button>
+          <button class="fs-btn danger" @click="confirmDelete">Delete</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -240,12 +336,30 @@ function venue(item: LibraryItem): string {
 
 .lib-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
-  padding: 18px 24px 12px;
+  padding: 12px 20px 12px 24px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+
+.add-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 12px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity var(--t);
+}
+.add-btn:hover { opacity: 0.88; }
 
 .lib-title {
   font-size: 15px;
@@ -535,6 +649,109 @@ function venue(item: LibraryItem): string {
   color: var(--text-secondary);
   line-height: 1.5;
 }
+
+/* ── Detail panel actions ──────────────────────────────────────────────────── */
+
+.dp-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.dp-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--t), color var(--t);
+  text-align: left;
+}
+
+.dp-action-btn:hover {
+  background: var(--bg-chrome-active);
+  color: var(--text);
+}
+
+.dp-action-btn.danger { color: #C0392B; }
+.dp-action-btn.danger:hover { background: rgba(192, 57, 43, 0.08); }
+
+/* ── Confirm dialog ────────────────────────────────────────────────────────── */
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-dialog {
+  background: var(--surface-solid);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 22px 24px 18px;
+  max-width: 340px;
+  width: 100%;
+}
+
+.confirm-msg {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.confirm-sub {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 18px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.fs-btn {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  font-family: var(--font-ui);
+  transition: opacity var(--t), background var(--t);
+}
+
+.fs-btn.secondary {
+  background: var(--bg-chrome-active);
+  color: var(--text-secondary);
+}
+.fs-btn.secondary:hover { opacity: 0.8; }
+
+.fs-btn.danger {
+  background: #C0392B;
+  color: #fff;
+}
+.fs-btn.danger:hover { opacity: 0.88; }
 
 /* ── Transition ────────────────────────────────────────────────────────────── */
 
