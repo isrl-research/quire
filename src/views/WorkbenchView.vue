@@ -145,19 +145,21 @@ function onAnnDragStart(e: DragEvent, annId: number) {
 }
 
 function onSectionDragOver(e: DragEvent, sectionId: number) {
-  e.preventDefault()
-  e.dataTransfer!.dropEffect = 'copy'
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
   dragOverSectionId.value = sectionId
 }
 
-function onSectionDragLeave() {
-  dragOverSectionId.value = null
+function onSectionDragLeave(e: DragEvent) {
+  // Only clear when leaving the card entirely, not when crossing into a child element
+  const card = e.currentTarget as HTMLElement
+  if (!card.contains(e.relatedTarget as Node)) {
+    dragOverSectionId.value = null
+  }
 }
 
 async function onSectionDrop(e: DragEvent, sectionId: number) {
-  e.preventDefault()
   dragOverSectionId.value = null
-  const annId = Number(e.dataTransfer!.getData('text/plain'))
+  const annId = Number(e.dataTransfer?.getData('text/plain'))
   if (!annId) return
   await wb.dropAnnotation(sectionId, annId)
 }
@@ -368,9 +370,9 @@ function annById(id: number): AnnotationWithSource | undefined {
               :key="sec.id"
               class="section-card"
               :class="{ 'drag-over': dragOverSectionId === sec.id }"
-              @dragover="onSectionDragOver($event, sec.id)"
-              @dragleave="onSectionDragLeave"
-              @drop="onSectionDrop($event, sec.id)"
+              @dragover.prevent="onSectionDragOver($event, sec.id)"
+              @dragleave="onSectionDragLeave($event)"
+              @drop.prevent="onSectionDrop($event, sec.id)"
             >
               <!-- Section header -->
               <div class="section-head">
