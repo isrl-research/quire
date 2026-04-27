@@ -18,6 +18,12 @@ pub use library::{
     // annotations
     create_annotation, get_annotations_for_attachment, get_all_annotations,
     delete_annotation, update_annotation_note,
+    // workbench
+    get_projects, create_project, delete_project, rename_project,
+    get_project_source_ids, add_project_source, remove_project_source,
+    get_project_sections, create_project_section, update_project_section,
+    delete_project_section, reorder_project_sections,
+    add_annotation_to_section, remove_annotation_from_section,
 };
 
 use serde::{Deserialize, Serialize};
@@ -691,6 +697,12 @@ pub fn run() {
             get_all_annotations,
             delete_annotation,
             update_annotation_note,
+            // Workbench
+            get_projects, create_project, delete_project, rename_project,
+            get_project_source_ids, add_project_source, remove_project_source,
+            get_project_sections, create_project_section, update_project_section,
+            delete_project_section, reorder_project_sections,
+            add_annotation_to_section, remove_annotation_from_section,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

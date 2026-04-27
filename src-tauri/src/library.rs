@@ -266,6 +266,33 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             note_text      TEXT,
             position_json  TEXT    NOT NULL DEFAULT '{}',
             created_at     INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS projects (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS project_sources (
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            item_id    INTEGER NOT NULL REFERENCES items(id)    ON DELETE CASCADE,
+            PRIMARY KEY (project_id, item_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS project_sections (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            title      TEXT    NOT NULL,
+            position   INTEGER NOT NULL DEFAULT 0,
+            note       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS section_annotations (
+            section_id    INTEGER NOT NULL REFERENCES project_sections(id) ON DELETE CASCADE,
+            annotation_id INTEGER NOT NULL,
+            position      INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (section_id, annotation_id)
         );",
     )
     .map_err(|e| e.to_string())
@@ -1402,4 +1429,213 @@ pub fn get_all_annotations() -> Result<Vec<AnnotationWithSource>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+// ── Workbench types ───────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSection {
+    pub id: i64,
+    pub project_id: i64,
+    pub title: String,
+    pub position: i64,
+    pub note: Option<String>,
+    pub annotation_ids: Vec<i64>,
+}
+
+// ── Workbench commands ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_projects() -> Result<Vec<Project>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, created_at FROM projects ORDER BY created_at DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| Ok(Project { id: row.get(0)?, name: row.get(1)?, created_at: row.get(2)? }))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn create_project(name: String) -> Result<Project, String> {
+    let conn = open_conn()?;
+    conn.execute("INSERT INTO projects (name) VALUES (?1)", [&name])
+        .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    conn.query_row(
+        "SELECT id, name, created_at FROM projects WHERE id=?1",
+        [id],
+        |row| Ok(Project { id: row.get(0)?, name: row.get(1)?, created_at: row.get(2)? }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_project(id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("DELETE FROM projects WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_project(id: i64, name: String) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("UPDATE projects SET name=?1 WHERE id=?2", params![name, id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_project_source_ids(project_id: i64) -> Result<Vec<i64>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare("SELECT item_id FROM project_sources WHERE project_id=?1")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([project_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<i64>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
+}
+
+#[tauri::command]
+pub fn add_project_source(project_id: i64, item_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO project_sources (project_id, item_id) VALUES (?1, ?2)",
+        params![project_id, item_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_project_source(project_id: i64, item_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "DELETE FROM project_sources WHERE project_id=?1 AND item_id=?2",
+        params![project_id, item_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_project_sections(project_id: i64) -> Result<Vec<ProjectSection>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, project_id, title, position, note
+             FROM project_sections WHERE project_id=?1 ORDER BY position",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(i64, i64, String, i64, Option<String>)> = stmt
+        .query_map([project_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut sections = Vec::new();
+    for (id, proj_id, title, position, note) in rows {
+        let mut ann_stmt = conn
+            .prepare(
+                "SELECT annotation_id FROM section_annotations WHERE section_id=?1 ORDER BY position",
+            )
+            .map_err(|e| e.to_string())?;
+        let ann_ids: Vec<i64> = ann_stmt
+            .query_map([id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        sections.push(ProjectSection { id, project_id: proj_id, title, position, note, annotation_ids: ann_ids });
+    }
+    Ok(sections)
+}
+
+#[tauri::command]
+pub fn create_project_section(project_id: i64, title: String, position: i64) -> Result<ProjectSection, String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT INTO project_sections (project_id, title, position) VALUES (?1, ?2, ?3)",
+        params![project_id, title, position],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(ProjectSection { id, project_id, title, position, note: None, annotation_ids: vec![] })
+}
+
+#[tauri::command]
+pub fn update_project_section(id: i64, title: String, note: Option<String>) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "UPDATE project_sections SET title=?1, note=?2 WHERE id=?3",
+        params![title, note, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_project_section(id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("DELETE FROM project_sections WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reorder_project_sections(project_id: i64, ordered_ids: Vec<i64>) -> Result<(), String> {
+    let conn = open_conn()?;
+    for (pos, id) in ordered_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE project_sections SET position=?1 WHERE id=?2 AND project_id=?3",
+            params![pos as i64, id, project_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_annotation_to_section(section_id: i64, annotation_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    let pos: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM section_annotations WHERE section_id=?1",
+            [section_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT OR IGNORE INTO section_annotations (section_id, annotation_id, position) VALUES (?1, ?2, ?3)",
+        params![section_id, annotation_id, pos],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_annotation_from_section(section_id: i64, annotation_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "DELETE FROM section_annotations WHERE section_id=?1 AND annotation_id=?2",
+        params![section_id, annotation_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
