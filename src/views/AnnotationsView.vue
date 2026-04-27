@@ -160,8 +160,8 @@ function shortAuthors(authors?: string): string {
           <div class="color-stripe" :style="{ background: a.color }"></div>
           <div class="ann-body">
             <div class="ann-text" @click="openInPdf(a)">
-              <span v-if="a.selectedText" class="ann-quote">"{{ a.selectedText }}"</span>
-              <span v-else class="ann-quote ann-quote--empty">(no text selected)</span>
+              <span v-if="a.selectedText || a.noteText" class="ann-quote">"{{ a.selectedText || a.noteText }}"</span>
+              <span v-else class="ann-quote ann-quote--empty">(empty)</span>
             </div>
             <div class="ann-meta">
               <span class="ann-page">p.&nbsp;{{ a.page }}</span>
@@ -211,8 +211,8 @@ function shortAuthors(authors?: string): string {
         <div class="color-stripe" :style="{ background: a.color }"></div>
         <div class="ann-body">
           <div class="ann-text" @click="openInPdf(a)">
-            <span v-if="a.selectedText" class="ann-quote">"{{ a.selectedText }}"</span>
-            <span v-else class="ann-quote ann-quote--empty">(no text selected)</span>
+            <span v-if="a.selectedText || a.noteText" class="ann-quote">"{{ a.selectedText || a.noteText }}"</span>
+            <span v-else class="ann-quote ann-quote--empty">(empty)</span>
           </div>
           <div class="ann-meta">
             <span class="ann-source">{{ shortAuthors(a.itemAuthors) }}{{ a.itemYear ? ' ' + a.itemYear : '' }}</span>

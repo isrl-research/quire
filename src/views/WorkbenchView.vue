@@ -135,33 +135,62 @@ async function submitAddSection() {
   addingSectionTitle.value = ''
 }
 
-// ── Drag and drop: annotations → sections ────────────────────────────────────
+// ── {{ trigger: annotation picker per section ────────────────────────────────
 
-const dragOverSectionId = ref<number | null>(null)
+const sectionQuery    = ref<Record<number, string>>({})
+const activeSectionId = ref<number | null>(null)
+const focusedIdx      = ref(0)
 
-function onAnnDragStart(e: DragEvent, annId: number) {
-  e.dataTransfer!.setData('text/plain', String(annId))
-  e.dataTransfer!.effectAllowed = 'copy'
+const suggestions = computed(() => {
+  if (activeSectionId.value === null) return []
+  const raw = sectionQuery.value[activeSectionId.value] ?? ''
+  const trigger = raw.lastIndexOf('{{')
+  if (trigger === -1) return []
+  const search = raw.slice(trigger + 2).toLowerCase().trim()
+  return sourceAnnotations.value
+    .filter(a => !droppedIds.value.has(a.id))
+    .filter(a =>
+      !search ||
+      (a.selectedText?.toLowerCase().includes(search)) ||
+      (a.noteText?.toLowerCase().includes(search)) ||
+      (a.itemTitle?.toLowerCase().includes(search)) ||
+      (a.itemAuthors?.toLowerCase().includes(search))
+    )
+    .slice(0, 8)
+})
+
+function onQueryInput(e: Event, sectionId: number) {
+  const val = (e.target as HTMLInputElement).value
+  sectionQuery.value = { ...sectionQuery.value, [sectionId]: val }
+  activeSectionId.value = sectionId
+  focusedIdx.value = 0
 }
 
-function onSectionDragOver(e: DragEvent, sectionId: number) {
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
-  dragOverSectionId.value = sectionId
+function onQueryFocus(sectionId: number) {
+  activeSectionId.value = sectionId
 }
 
-function onSectionDragLeave(e: DragEvent) {
-  // Only clear when leaving the card entirely, not when crossing into a child element
-  const card = e.currentTarget as HTMLElement
-  if (!card.contains(e.relatedTarget as Node)) {
-    dragOverSectionId.value = null
-  }
+function onQueryBlur() {
+  // small delay so mousedown on suggestion fires first
+  setTimeout(() => { activeSectionId.value = null }, 180)
 }
 
-async function onSectionDrop(e: DragEvent, sectionId: number) {
-  dragOverSectionId.value = null
-  const annId = Number(e.dataTransfer?.getData('text/plain'))
-  if (!annId) return
+function clearQuery(sectionId: number) {
+  sectionQuery.value = { ...sectionQuery.value, [sectionId]: '' }
+  activeSectionId.value = null
+}
+
+function suggestDown() { focusedIdx.value = Math.min(focusedIdx.value + 1, suggestions.value.length - 1) }
+function suggestUp()   { focusedIdx.value = Math.max(focusedIdx.value - 1, 0) }
+
+async function selectSuggestion(sectionId: number, annId: number) {
   await wb.dropAnnotation(sectionId, annId)
+  clearQuery(sectionId)
+}
+
+async function selectFocused(sectionId: number) {
+  const a = suggestions.value[focusedIdx.value]
+  if (a) await selectSuggestion(sectionId, a.id)
 }
 
 // ── Sidebar annotation groups ─────────────────────────────────────────────────
@@ -214,6 +243,11 @@ function shortAuthors(authors?: string): string {
 
 function annById(id: number): AnnotationWithSource | undefined {
   return ann.allAnnotations.value.find(a => a.id === id)
+}
+
+function annText(a?: AnnotationWithSource): string {
+  if (!a) return ''
+  return a.selectedText?.trim() || a.noteText?.trim() || '—'
 }
 </script>
 
@@ -369,10 +403,6 @@ function annById(id: number): AnnotationWithSource | undefined {
               v-for="(sec, idx) in wb.sections.value"
               :key="sec.id"
               class="section-card"
-              :class="{ 'drag-over': dragOverSectionId === sec.id }"
-              @dragover.prevent="onSectionDragOver($event, sec.id)"
-              @dragleave="onSectionDragLeave($event)"
-              @drop.prevent="onSectionDrop($event, sec.id)"
             >
               <!-- Section header -->
               <div class="section-head">
@@ -414,7 +444,7 @@ function annById(id: number): AnnotationWithSource | undefined {
                 </div>
               </div>
 
-              <!-- Dropped annotations -->
+              <!-- Dropped annotations + {{ trigger -->
               <div class="section-body">
                 <div
                   v-for="annId in sec.annotationIds"
@@ -423,7 +453,7 @@ function annById(id: number): AnnotationWithSource | undefined {
                 >
                   <div class="dropped-stripe" :style="{ background: annById(annId)?.color }"></div>
                   <div class="dropped-body">
-                    <div class="dropped-text">{{ annById(annId)?.selectedText ?? '(no text)' }}</div>
+                    <div class="dropped-text">{{ annText(annById(annId)) }}</div>
                     <div class="dropped-meta">
                       {{ shortAuthors(annById(annId)?.itemAuthors) }}{{ annById(annId)?.itemYear ? ' ' + annById(annId)?.itemYear : '' }}
                       · p.&nbsp;{{ annById(annId)?.page }}
@@ -438,9 +468,38 @@ function annById(id: number): AnnotationWithSource | undefined {
                   </button>
                 </div>
 
-                <!-- Drop zone hint -->
-                <div v-if="sec.annotationIds.length === 0" class="drop-hint">
-                  <span>Drag annotations here</span>
+                <!-- {{ annotation trigger -->
+                <div class="section-trigger-wrap">
+                  <input
+                    :value="sectionQuery[sec.id] ?? ''"
+                    class="section-trigger-input"
+                    :placeholder="sec.annotationIds.length === 0 ? 'Type {{ to add an annotation…' : '{{'"
+                    @input="onQueryInput($event, sec.id)"
+                    @focus="onQueryFocus(sec.id)"
+                    @blur="onQueryBlur"
+                    @keydown.escape.prevent="clearQuery(sec.id)"
+                    @keydown.down.prevent="suggestDown"
+                    @keydown.up.prevent="suggestUp"
+                    @keydown.enter.prevent="selectFocused(sec.id)"
+                  />
+                  <div
+                    v-if="activeSectionId === sec.id && suggestions.length > 0"
+                    class="sug-list"
+                  >
+                    <div
+                      v-for="(a, i) in suggestions"
+                      :key="a.id"
+                      class="sug-row"
+                      :class="{ 'sug-focused': i === focusedIdx }"
+                      @mousedown.prevent="selectSuggestion(sec.id, a.id)"
+                    >
+                      <div class="sug-stripe" :style="{ background: a.color }"></div>
+                      <div class="sug-body">
+                        <div class="sug-text">{{ annText(a) }}</div>
+                        <div class="sug-meta">{{ shortAuthors(a.itemAuthors) }}{{ a.itemYear ? ' ' + a.itemYear : '' }} · p.{{ a.page }}</div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -514,12 +573,10 @@ function annById(id: number): AnnotationWithSource | undefined {
                     :key="a.id"
                     class="sidebar-ann"
                     :class="{ 'is-dropped': droppedIds.has(a.id) }"
-                    draggable="true"
-                    @dragstart="onAnnDragStart($event, a.id)"
                   >
                     <div class="sidebar-stripe" :style="{ background: a.color }"></div>
                     <div class="sidebar-ann-body">
-                      <div class="sidebar-ann-text">{{ a.selectedText ?? '(no text)' }}</div>
+                      <div class="sidebar-ann-text">{{ annText(a) }}</div>
                       <div class="sidebar-ann-meta">p.&nbsp;{{ a.page }}</div>
                     </div>
                     <div v-if="droppedIds.has(a.id)" class="dropped-badge" title="Already in outline">✓</div>
@@ -883,13 +940,7 @@ function annById(id: number): AnnotationWithSource | undefined {
   background: var(--surface-solid);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
-  transition: border-color var(--t), box-shadow var(--t);
-}
-
-.section-card.drag-over {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  overflow: visible;
 }
 
 .section-head {
@@ -957,23 +1008,81 @@ function annById(id: number): AnnotationWithSource | undefined {
   min-height: 48px;
 }
 
-.drop-hint {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 32px;
-  font-size: 11.5px;
-  color: var(--text-tertiary);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-sm);
-  transition: border-color var(--t), color var(--t);
+/* {{ trigger input */
+.section-trigger-wrap {
+  position: relative;
 }
 
-.section-card.drag-over .drop-hint {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
+.section-trigger-input {
+  width: 100%;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--t), background var(--t);
 }
+
+.section-trigger-input::placeholder { color: var(--text-tertiary); font-size: 11.5px; }
+.section-trigger-input:focus {
+  border-color: var(--border-medium);
+  background: var(--surface-solid);
+  color: var(--text);
+}
+
+/* Suggestion dropdown */
+.sug-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--surface-solid);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-float);
+  z-index: 50;
+  overflow: hidden;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.sug-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  padding: 7px 10px 7px 0;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background var(--t);
+}
+.sug-row:last-child { border-bottom: none; }
+.sug-row:hover, .sug-row.sug-focused { background: var(--bg-chrome); }
+
+.sug-stripe {
+  width: 3px;
+  align-self: stretch;
+  flex-shrink: 0;
+  opacity: 0.7;
+  margin-right: 9px;
+}
+
+.sug-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+
+.sug-text {
+  font-size: 12px;
+  color: var(--text);
+  font-family: var(--font-doc);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sug-meta { font-size: 10.5px; color: var(--text-tertiary); }
 
 .dropped-ann {
   display: flex;
@@ -1070,7 +1179,7 @@ function annById(id: number): AnnotationWithSource | undefined {
 /* ── Sidebar ─────────────────────────────────────────────────────────────── */
 
 .wb-sidebar {
-  width: 256px;
+  width: 320px;
   flex-shrink: 0;
   border-left: 1px solid var(--border);
   background: var(--bg-chrome);
