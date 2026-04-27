@@ -16,7 +16,7 @@ pub use library::{
     pick_and_attach_file, get_item_attachments, read_attachment_bytes,
     open_attachment_external, remove_attachment,
     // annotations
-    create_annotation, get_annotations_for_attachment,
+    create_annotation, get_annotations_for_attachment, get_all_annotations,
     delete_annotation, update_annotation_note,
 };
 
@@ -688,6 +688,7 @@ pub fn run() {
             // Library — annotations
             create_annotation,
             get_annotations_for_attachment,
+            get_all_annotations,
             delete_annotation,
             update_annotation_note,
         ])

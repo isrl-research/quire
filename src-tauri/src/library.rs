@@ -122,6 +122,25 @@ pub struct Annotation {
     pub created_at:    i64,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationWithSource {
+    pub id:                  i64,
+    pub item_id:             i64,
+    pub attachment_id:       i64,
+    pub page:                i64,
+    pub ann_type:            String,
+    pub color:               String,
+    pub selected_text:       Option<String>,
+    pub note_text:           Option<String>,
+    pub created_at:          i64,
+    pub item_title:          Option<String>,
+    pub item_authors:        Option<String>,
+    pub item_year:           Option<String>,
+    pub item_key:            String,
+    pub attachment_file_name: String,
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationInput {
@@ -1343,4 +1362,44 @@ pub fn update_annotation_note(id: i64, note_text: String) -> Result<(), String> 
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_all_annotations() -> Result<Vec<AnnotationWithSource>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.id, a.item_id, a.attachment_id, a.page, a.ann_type, a.color,
+                    a.selected_text, a.note_text, a.created_at,
+                    i.title, i.authors, i.year, i.key,
+                    att.file_name
+             FROM annotations a
+             JOIN attachments att ON att.id = a.attachment_id
+             JOIN items i ON i.id = a.item_id
+             ORDER BY i.title COLLATE NOCASE, a.page, a.created_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(AnnotationWithSource {
+                id:                   row.get(0)?,
+                item_id:              row.get(1)?,
+                attachment_id:        row.get(2)?,
+                page:                 row.get(3)?,
+                ann_type:             row.get(4)?,
+                color:                row.get(5)?,
+                selected_text:        row.get(6)?,
+                note_text:            row.get(7)?,
+                created_at:           row.get(8)?,
+                item_title:           row.get(9)?,
+                item_authors:         row.get(10)?,
+                item_year:            row.get(11)?,
+                item_key:             row.get(12)?,
+                attachment_file_name: row.get(13)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
 }

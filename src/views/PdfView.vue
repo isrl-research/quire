@@ -89,7 +89,8 @@ async function loadPdf() {
     // before we try to render into it (canvas is inside v-else)
     loading.value = false
     await nextTick()
-    await renderPage(1)
+    const startPage = route.query.page ? Math.max(1, Number(route.query.page)) : 1
+    await renderPage(startPage)
     await loadAnnotations(attachmentId.value)
     renderAnnotationOverlay()
   } catch (e) {

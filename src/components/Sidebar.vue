@@ -45,6 +45,18 @@ const route = useRoute()
       </router-link>
 
       <router-link
+        to="/annotations"
+        class="nav-item"
+        :class="{ active: route.name === 'annotations' }"
+        title="Annotations"
+      >
+        <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2.5 12.5L5 10l7.5-7.5a1.414 1.414 0 012 2L7 12l-2.5.5z"/>
+          <line x1="1.5" y1="15.5" x2="15.5" y2="15.5"/>
+        </svg>
+      </router-link>
+
+      <router-link
         to="/pdf"
         class="nav-item"
         :class="{ active: route.name === 'pdf' }"
