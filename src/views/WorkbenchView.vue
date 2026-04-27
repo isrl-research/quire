@@ -38,7 +38,7 @@ const sourceAnnotations = computed(() =>
 // Annotations already dropped anywhere in this project
 const droppedIds = computed(() => {
   const set = new Set<number>()
-  for (const s of wb.sections.value) s.annotationIds.forEach(id => set.add(id))
+  for (const s of wb.sections.value) s.annotations.forEach(e => set.add(e.annotationId))
   return set
 })
 
@@ -249,6 +249,12 @@ function annText(a?: AnnotationWithSource): string {
   if (!a) return ''
   return a.selectedText?.trim() || a.noteText?.trim() || '—'
 }
+
+function autoResize(e: Event) {
+  const el = e.target as HTMLTextAreaElement
+  el.style.height = 'auto'
+  el.style.height = el.scrollHeight + 'px'
+}
 </script>
 
 <template>
@@ -447,20 +453,28 @@ function annText(a?: AnnotationWithSource): string {
               <!-- Dropped annotations + {{ trigger -->
               <div class="section-body">
                 <div
-                  v-for="annId in sec.annotationIds"
-                  :key="annId"
+                  v-for="entry in sec.annotations"
+                  :key="entry.annotationId"
                   class="dropped-ann"
                 >
-                  <div class="dropped-stripe" :style="{ background: annById(annId)?.color }"></div>
+                  <div class="dropped-stripe" :style="{ background: annById(entry.annotationId)?.color }"></div>
                   <div class="dropped-body">
-                    <div class="dropped-text">{{ annText(annById(annId)) }}</div>
+                    <div class="dropped-text">{{ annText(annById(entry.annotationId)) }}</div>
                     <div class="dropped-meta">
-                      {{ shortAuthors(annById(annId)?.itemAuthors) }}{{ annById(annId)?.itemYear ? ' ' + annById(annId)?.itemYear : '' }}
-                      · p.&nbsp;{{ annById(annId)?.page }}
+                      {{ shortAuthors(annById(entry.annotationId)?.itemAuthors) }}{{ annById(entry.annotationId)?.itemYear ? ' ' + annById(entry.annotationId)?.itemYear : '' }}
+                      · p.&nbsp;{{ annById(entry.annotationId)?.page }}
                     </div>
+                    <textarea
+                      class="dropped-note"
+                      :value="entry.note ?? ''"
+                      placeholder="Add a note…"
+                      rows="1"
+                      @input="autoResize($event)"
+                      @change="wb.updateSectionAnnotationNote(sec.id, entry.annotationId, ($event.target as HTMLTextAreaElement).value)"
+                    ></textarea>
                   </div>
                   <button class="dropped-remove" title="Remove"
-                          @click="wb.liftAnnotation(sec.id, annId)">
+                          @click="wb.liftAnnotation(sec.id, entry.annotationId)">
                     <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor"
                          stroke-width="1.5" stroke-linecap="round">
                       <line x1="1" y1="1" x2="8" y2="8"/><line x1="8" y1="1" x2="1" y2="8"/>
@@ -473,7 +487,7 @@ function annText(a?: AnnotationWithSource): string {
                   <input
                     :value="sectionQuery[sec.id] ?? ''"
                     class="section-trigger-input"
-                    :placeholder="sec.annotationIds.length === 0 ? 'Type {{ to add an annotation…' : '{{'"
+                    :placeholder="sec.annotations.length === 0 ? 'Type {{ to add an annotation…' : '{{'"
                     @input="onQueryInput($event, sec.id)"
                     @focus="onQueryFocus(sec.id)"
                     @blur="onQueryBlur"
@@ -1128,6 +1142,28 @@ function annText(a?: AnnotationWithSource): string {
   font-size: 10.5px;
   color: var(--text-tertiary);
 }
+
+.dropped-note {
+  width: 100%;
+  margin-top: 5px;
+  padding: 0;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--border);
+  padding-top: 5px;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  min-height: 20px;
+  line-height: 1.5;
+  display: block;
+}
+
+.dropped-note::placeholder { color: var(--text-tertiary); }
+.dropped-note:focus { color: var(--text); }
 
 .dropped-remove {
   background: none;

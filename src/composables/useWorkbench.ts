@@ -1,11 +1,15 @@
 import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { type AnnotationWithSource } from './useAnnotations'
 
 export interface Project {
   id: number
   name: string
   createdAt: number
+}
+
+export interface SectionAnnotationEntry {
+  annotationId: number
+  note?: string
 }
 
 export interface ProjectSection {
@@ -14,16 +18,16 @@ export interface ProjectSection {
   title: string
   position: number
   note?: string
-  annotationIds: number[]
+  annotations: SectionAnnotationEntry[]
 }
 
 // ── Module-level singletons ───────────────────────────────────────────────────
 
-const projects      = ref<Project[]>([])
-const currentId     = ref<number | null>(null)
-const sections      = ref<ProjectSection[]>([])
-const sourceIds     = ref<number[]>([])
-const loading       = ref(false)
+const projects  = ref<Project[]>([])
+const currentId = ref<number | null>(null)
+const sections  = ref<ProjectSection[]>([])
+const sourceIds = ref<number[]>([])
+const loading   = ref(false)
 
 export function useWorkbench() {
 
@@ -84,8 +88,8 @@ export function useWorkbench() {
       invoke<number[]>('get_project_source_ids', { projectId: id }),
       invoke<ProjectSection[]>('get_project_sections', { projectId: id }),
     ])
-    sourceIds.value  = sids
-    sections.value   = secs
+    sourceIds.value = sids
+    sections.value  = secs
   }
 
   // ── Sources ─────────────────────────────────────────────────────────────────
@@ -119,14 +123,6 @@ export function useWorkbench() {
     await invoke('update_project_section', { id, title, note: sec.note ?? null })
     const idx = sections.value.findIndex(s => s.id === id)
     if (idx !== -1) sections.value[idx] = { ...sections.value[idx], title }
-  }
-
-  async function updateSectionNote(id: number, note: string): Promise<void> {
-    const sec = sections.value.find(s => s.id === id)
-    if (!sec) return
-    await invoke('update_project_section', { id, title: sec.title, note: note || null })
-    const idx = sections.value.findIndex(s => s.id === id)
-    if (idx !== -1) sections.value[idx] = { ...sections.value[idx], note: note || undefined }
   }
 
   async function deleteSection(id: number): Promise<void> {
@@ -163,10 +159,10 @@ export function useWorkbench() {
   async function dropAnnotation(sectionId: number, annotationId: number): Promise<void> {
     await invoke('add_annotation_to_section', { sectionId, annotationId })
     const idx = sections.value.findIndex(s => s.id === sectionId)
-    if (idx !== -1 && !sections.value[idx].annotationIds.includes(annotationId)) {
+    if (idx !== -1 && !sections.value[idx].annotations.some(e => e.annotationId === annotationId)) {
       sections.value[idx] = {
         ...sections.value[idx],
-        annotationIds: [...sections.value[idx].annotationIds, annotationId],
+        annotations: [...sections.value[idx].annotations, { annotationId }],
       }
     }
   }
@@ -177,29 +173,36 @@ export function useWorkbench() {
     if (idx !== -1) {
       sections.value[idx] = {
         ...sections.value[idx],
-        annotationIds: sections.value[idx].annotationIds.filter(id => id !== annotationId),
+        annotations: sections.value[idx].annotations.filter(e => e.annotationId !== annotationId),
       }
     }
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────────
-
-  function sectionAnnotations(
-    sec: ProjectSection,
-    all: AnnotationWithSource[],
-  ): AnnotationWithSource[] {
-    const set = new Set(sec.annotationIds)
-    const byId = new Map(all.map(a => [a.id, a]))
-    return sec.annotationIds.filter(id => set.has(id)).map(id => byId.get(id)!).filter(Boolean)
+  async function updateSectionAnnotationNote(
+    sectionId: number,
+    annotationId: number,
+    note: string,
+  ): Promise<void> {
+    await invoke('update_section_annotation_note', {
+      sectionId,
+      annotationId,
+      note: note || null,
+    })
+    const secIdx = sections.value.findIndex(s => s.id === sectionId)
+    if (secIdx === -1) return
+    const annIdx = sections.value[secIdx].annotations.findIndex(e => e.annotationId === annotationId)
+    if (annIdx === -1) return
+    const updated = [...sections.value[secIdx].annotations]
+    updated[annIdx] = { ...updated[annIdx], note: note || undefined }
+    sections.value[secIdx] = { ...sections.value[secIdx], annotations: updated }
   }
 
   return {
     projects, currentId, currentProject, sections, sourceIds, loading,
     loadProjects, createProject, deleteProject, renameProject, selectProject,
     addSource, removeSource,
-    addSection, renameSection, updateSectionNote, deleteSection,
+    addSection, renameSection, deleteSection,
     moveSectionUp, moveSectionDown,
-    dropAnnotation, liftAnnotation,
-    sectionAnnotations,
+    dropAnnotation, liftAnnotation, updateSectionAnnotationNote,
   }
 }

@@ -295,7 +295,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             PRIMARY KEY (section_id, annotation_id)
         );",
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Migration: add note column if it doesn't exist yet
+    let _ = conn.execute_batch("ALTER TABLE section_annotations ADD COLUMN note TEXT;");
+    Ok(())
 }
 
 fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<LibraryItem> {
@@ -1443,13 +1446,20 @@ pub struct Project {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct SectionAnnotationEntry {
+    pub annotation_id: i64,
+    pub note: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectSection {
     pub id: i64,
     pub project_id: i64,
     pub title: String,
     pub position: i64,
     pub note: Option<String>,
-    pub annotation_ids: Vec<i64>,
+    pub annotations: Vec<SectionAnnotationEntry>,
 }
 
 // ── Workbench commands ────────────────────────────────────────────────────────
@@ -1554,15 +1564,17 @@ pub fn get_project_sections(project_id: i64) -> Result<Vec<ProjectSection>, Stri
     for (id, proj_id, title, position, note) in rows {
         let mut ann_stmt = conn
             .prepare(
-                "SELECT annotation_id FROM section_annotations WHERE section_id=?1 ORDER BY position",
+                "SELECT annotation_id, note FROM section_annotations WHERE section_id=?1 ORDER BY position",
             )
             .map_err(|e| e.to_string())?;
-        let ann_ids: Vec<i64> = ann_stmt
-            .query_map([id], |r| r.get(0))
+        let entries: Vec<SectionAnnotationEntry> = ann_stmt
+            .query_map([id], |r| {
+                Ok(SectionAnnotationEntry { annotation_id: r.get(0)?, note: r.get(1)? })
+            })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        sections.push(ProjectSection { id, project_id: proj_id, title, position, note, annotation_ids: ann_ids });
+        sections.push(ProjectSection { id, project_id: proj_id, title, position, note, annotations: entries });
     }
     Ok(sections)
 }
@@ -1576,7 +1588,7 @@ pub fn create_project_section(project_id: i64, title: String, position: i64) -> 
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
-    Ok(ProjectSection { id, project_id, title, position, note: None, annotation_ids: vec![] })
+    Ok(ProjectSection { id, project_id, title, position, note: None, annotations: vec![] })
 }
 
 #[tauri::command]
@@ -1635,6 +1647,21 @@ pub fn remove_annotation_from_section(section_id: i64, annotation_id: i64) -> Re
     conn.execute(
         "DELETE FROM section_annotations WHERE section_id=?1 AND annotation_id=?2",
         params![section_id, annotation_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_section_annotation_note(
+    section_id: i64,
+    annotation_id: i64,
+    note: Option<String>,
+) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "UPDATE section_annotations SET note=?1 WHERE section_id=?2 AND annotation_id=?3",
+        params![note, section_id, annotation_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

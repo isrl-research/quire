@@ -23,7 +23,7 @@ pub use library::{
     get_project_source_ids, add_project_source, remove_project_source,
     get_project_sections, create_project_section, update_project_section,
     delete_project_section, reorder_project_sections,
-    add_annotation_to_section, remove_annotation_from_section,
+    add_annotation_to_section, remove_annotation_from_section, update_section_annotation_note,
 };
 
 use serde::{Deserialize, Serialize};
@@ -702,7 +702,7 @@ pub fn run() {
             get_project_source_ids, add_project_source, remove_project_source,
             get_project_sections, create_project_section, update_project_section,
             delete_project_section, reorder_project_sections,
-            add_annotation_to_section, remove_annotation_from_section,
+            add_annotation_to_section, remove_annotation_from_section, update_section_annotation_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
