@@ -2,6 +2,8 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useEditor, EditorContent } from '@tiptap/vue-3'
+import { useWorkbench } from '../composables/useWorkbench'
+import { useAllAnnotations } from '../composables/useAnnotations'
 import StarterKit from '@tiptap/starter-kit'
 import Heading from '@tiptap/extension-heading'
 import { Mathematics } from '@tiptap/extension-mathematics'
@@ -33,6 +35,22 @@ const ExtendedHeading = Heading.configure({ levels: [1, 2, 3] }).extend({
 const router = useRouter()
 const { docTitle, docSubtitle, docStatus, docDate, docAuthors, citations, isDirty } = useDocument()
 const { openDocument, saveDocument } = useFileOps()
+
+// ── Workbench context ──────────────────────────────────────────────────────────
+const { currentId, currentProject, sections, notes } = useWorkbench()
+const ann = useAllAnnotations()
+
+const activeSectionTitle = ref<string | null>(null)
+// 'outline' | 'citation' | 'meta'
+const rightPanelMode = ref<'outline' | 'citation' | 'meta'>('outline')
+
+function annForId(id: number) {
+  return ann.allAnnotations.value.find(a => a.id === id)
+}
+function annText(a?: ReturnType<typeof annForId>) {
+  if (!a) return ''
+  return a.selectedText?.trim() || a.noteText?.trim() || '—'
+}
 
 // ── Editor ────────────────────────────────────────────────────────────────────
 
@@ -79,6 +97,15 @@ const editor = useEditor({
   content: INITIAL_CONTENT,
   onUpdate() {
     isDirty.value = true
+  },
+  onSelectionUpdate({ editor: ed }) {
+    if (!currentId.value) return
+    const { $from } = ed.state.selection
+    let title: string | null = null
+    ed.state.doc.nodesBetween(0, $from.pos, (node) => {
+      if (node.type.name === 'heading') title = node.textContent
+    })
+    activeSectionTitle.value = title
   },
 })
 
@@ -218,7 +245,7 @@ function cancelHide() {
 
 // ── Citation panel state ──────────────────────────────────────────────────────
 
-const panelOpen = ref(false)
+const panelOpen = ref(false)       // kept for tooltip logic compatibility
 const activeCitation = ref<BibEntry | null>(null)
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
@@ -257,10 +284,9 @@ async function handleKeydown(e: KeyboardEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
-  // Imperative scroll listener — more reliable than @scroll on the template ref
   documentAreaRef.value?.addEventListener('scroll', onDocScroll, { passive: true })
+  ann.loadAll()
 
-  // Load content when a file is opened from the hamburger menu or file ops
   emitter.on('doc:opened', ({ content }) => {
     if (editor.value && content) {
       editor.value.commands.setContent(content)
@@ -281,9 +307,7 @@ onMounted(() => {
     tooltipVisible.value = true
   })
 
-  emitter.on('cite:leave', () => {
-    startHide()
-  })
+  emitter.on('cite:leave', () => { startHide() })
 
   emitter.on('cite:click', ({ key }) => {
     cancelHide()
@@ -292,6 +316,7 @@ onMounted(() => {
     if (!cite) return
     activeCitation.value = cite
     panelOpen.value = true
+    rightPanelMode.value = 'citation'
   })
 })
 
@@ -308,7 +333,8 @@ onBeforeUnmount(() => {
 
 function closePanel() {
   panelOpen.value = false
-  setTimeout(() => { activeCitation.value = null }, 260)
+  activeCitation.value = null
+  rightPanelMode.value = 'outline'
 }
 
 function openTooltipCitation() {
@@ -331,6 +357,7 @@ function openMeta() {
   panelOpen.value = false
   activeCitation.value = null
   metaOpen.value = true
+  rightPanelMode.value = 'meta'
 }
 
 function addAuthor() {
@@ -388,6 +415,42 @@ function onDocScroll() {
   if (focusMode.value) updateDocAbove()
 }
 
+// ── Paste draft ──────────────────────────────────────────────────────────────
+
+const pasteDraftOpen = ref(false)
+const pasteDraftMd   = ref('')
+
+function mdInline(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/\[@([^\]]+)\]/g, '<span data-cite-key="$1" data-index="0"></span>')
+}
+
+function mdToHtml(md: string): string {
+  return md.split(/\n{2,}/).map(block => {
+    const t = block.trim()
+    if (!t) return ''
+    if (t.startsWith('### ')) return `<h3>${mdInline(t.slice(4))}</h3>`
+    if (t.startsWith('## '))  return `<h2>${mdInline(t.slice(3))}</h2>`
+    if (t.startsWith('# '))   return `<h1>${mdInline(t.slice(2))}</h1>`
+    // bullet list block
+    if (t.split('\n').every(l => /^[-*+]\s/.test(l))) {
+      return '<ul>' + t.split('\n').map(l => `<li>${mdInline(l.replace(/^[-*+]\s/, ''))}</li>`).join('') + '</ul>'
+    }
+    return `<p>${t.split('\n').map(mdInline).join(' ')}</p>`
+  }).filter(Boolean).join('')
+}
+
+function importDraft() {
+  const html = mdToHtml(pasteDraftMd.value)
+  if (!html || !editor.value) return
+  editor.value.commands.setContent(html)
+  isDirty.value = true
+  pasteDraftOpen.value = false
+  pasteDraftMd.value = ''
+}
+
 // ── Byline helpers ────────────────────────────────────────────────────────────
 
 const uniqueAffiliations = computed(() => {
@@ -443,6 +506,14 @@ function openOrcid(orcid: string) {
               <path d="M8.5 1.5a1.414 1.414 0 0 1 2 2L3 11H1v-2L8.5 1.5z"/>
             </svg>
           </button>
+          <button class="meta-trigger" @click="pasteDraftOpen = true" title="Paste AI draft">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 1h4l1 1v1H3V2L4 1z"/>
+              <rect x="2" y="3" width="8" height="8" rx="1"/>
+              <line x1="4.5" y1="6" x2="7.5" y2="6"/>
+              <line x1="6" y1="4.5" x2="6" y2="7.5"/>
+            </svg>
+          </button>
         </div>
         <h1 class="paper-title">{{ docTitle }}</h1>
         <p class="paper-subtitle" v-if="docSubtitle">{{ docSubtitle }}</p>
@@ -485,15 +556,72 @@ function openOrcid(orcid: string) {
       </div>
     </div>
 
-    <!-- Citation panel (slide in) -->
-    <Transition name="panel">
-      <div class="citation-panel" v-if="panelOpen">
+    <!-- Unified right panel: outline / citation / meta -->
+    <div
+      class="right-panel"
+      v-if="currentId !== null || rightPanelMode === 'citation' || rightPanelMode === 'meta'"
+    >
+
+      <!-- ── Outline mode ────────────────────────────────────────────────── -->
+      <template v-if="rightPanelMode === 'outline'">
+        <div class="rp-header">
+          <span class="rp-title">{{ currentProject?.name ?? 'Outline' }}</span>
+        </div>
+        <div class="rp-body">
+          <div v-if="sections.length === 0" class="rp-empty">
+            No sections yet — add them in the Workbench.
+          </div>
+          <div
+            v-for="sec in sections"
+            :key="sec.id"
+            class="rp-section"
+            :class="{ 'rp-section--active': sec.title === activeSectionTitle }"
+          >
+            <div class="rp-section-title">{{ sec.title }}</div>
+            <!-- Active section: show annotation snippets -->
+            <template v-if="sec.title === activeSectionTitle && sec.annotations.length">
+              <div
+                v-for="entry in sec.annotations"
+                :key="entry.annotationId"
+                class="rp-ann"
+              >
+                <div class="rp-ann-stripe" :style="{ background: annForId(entry.annotationId)?.color ?? '#ccc' }"></div>
+                <div class="rp-ann-body">
+                  <div class="rp-ann-text">{{ annText(annForId(entry.annotationId)) }}</div>
+                  <div class="rp-ann-meta">
+                    p.{{ annForId(entry.annotationId)?.page }}
+                    <template v-if="entry.note"> · {{ entry.note }}</template>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <!-- Active section: show note entries -->
+            <template v-if="sec.title === activeSectionTitle && sec.noteEntries.length">
+              <div
+                v-for="ne in sec.noteEntries"
+                :key="ne.noteId"
+                class="rp-note"
+              >
+                <div class="rp-note-stripe"></div>
+                <div class="rp-ann-text">{{ notes.find(n => n.id === ne.noteId)?.body || '—' }}</div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- ── Citation mode ───────────────────────────────────────────────── -->
+      <template v-else-if="rightPanelMode === 'citation'">
         <div class="cp-header">
+          <button class="cp-back" @click="closePanel" title="Back to outline">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8 2L3 6.5 8 11"/>
+            </svg>
+          </button>
           <span class="cp-label">Source</span>
           <button class="cp-close" @click="closePanel" title="Close">
             <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
-              <line x1="1" y1="1" x2="12" y2="12"/>
-              <line x1="12" y1="1" x2="1" y2="12"/>
+              <line x1="1" y1="1" x2="12" y2="12"/><line x1="12" y1="1" x2="1" y2="12"/>
             </svg>
           </button>
         </div>
@@ -515,18 +643,20 @@ function openOrcid(orcid: string) {
             </svg>
           </button>
         </div>
-      </div>
-    </Transition>
+      </template>
 
-    <!-- Metadata panel (slide in) -->
-    <Transition name="panel">
-      <div class="citation-panel meta-panel" v-if="metaOpen">
+      <!-- ── Meta mode ───────────────────────────────────────────────────── -->
+      <template v-else-if="rightPanelMode === 'meta'">
         <div class="cp-header">
+          <button class="cp-back" @click="rightPanelMode = 'outline'" title="Back to outline">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8 2L3 6.5 8 11"/>
+            </svg>
+          </button>
           <span class="cp-label">Document</span>
-          <button class="cp-close" @click="metaOpen = false" title="Close">
+          <button class="cp-close" @click="metaOpen = false; rightPanelMode = 'outline'" title="Close">
             <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
-              <line x1="1" y1="1" x2="12" y2="12"/>
-              <line x1="12" y1="1" x2="1" y2="12"/>
+              <line x1="1" y1="1" x2="12" y2="12"/><line x1="12" y1="1" x2="1" y2="12"/>
             </svg>
           </button>
         </div>
@@ -593,8 +723,9 @@ function openOrcid(orcid: string) {
           </div>
 
         </div>
-      </div>
-    </Transition>
+      </template>
+
+    </div><!-- end .right-panel -->
   </div>
 
   <!-- Find & Replace bar -->
@@ -680,6 +811,37 @@ function openOrcid(orcid: string) {
         <button class="tt-cta" @click="openTooltipCitation">View in detail →</button>
       </template>
     </div>
+  </Teleport>
+
+  <!-- Paste draft modal -->
+  <Teleport to="body">
+    <Transition name="modal-fade">
+      <div v-if="pasteDraftOpen" class="paste-draft-backdrop" @click.self="pasteDraftOpen = false">
+        <div class="paste-draft-modal">
+          <div class="pdm-header">
+            <span class="pdm-title">Paste AI Draft</span>
+            <button class="pdm-close" @click="pasteDraftOpen = false">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+                <line x1="1" y1="1" x2="11" y2="11"/><line x1="11" y1="1" x2="1" y2="11"/>
+              </svg>
+            </button>
+          </div>
+          <p class="pdm-hint">Paste markdown from your AI assistant. Headings, bold/italic, and <code>[@citeKey]</code> citations are converted automatically.</p>
+          <textarea
+            v-model="pasteDraftMd"
+            class="pdm-textarea"
+            placeholder="Paste markdown here…"
+            spellcheck="false"
+            autofocus
+            @keydown.escape.prevent="pasteDraftOpen = false"
+          ></textarea>
+          <div class="pdm-actions">
+            <button class="pdm-import" :disabled="!pasteDraftMd.trim()" @click="importDraft">Import into editor</button>
+            <button class="pdm-cancel" @click="pasteDraftOpen = false">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </Teleport>
 
   <!-- Math edit overlay -->
@@ -888,19 +1050,124 @@ function openOrcid(orcid: string) {
   /* EditorContent fills remaining space; ProseMirror styled in editor.css */
 }
 
-/* Citation panel — identical to placeholder */
-.citation-panel {
-  width: 336px;
+/* ── Unified right panel ──────────────────────────────────────── */
+
+.right-panel {
+  width: 260px;
   flex-shrink: 0;
-  border-left: 3px solid var(--accent);
-  background: var(--surface);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  border-left: 1px solid var(--border);
+  background: var(--bg-chrome);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: -4px 0 20px rgba(0,0,0,0.06);
 }
+
+.rp-header {
+  padding: 11px 14px 9px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.rp-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+}
+
+.rp-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.rp-empty {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.rp-section {
+  padding: 5px 14px;
+  cursor: default;
+}
+
+.rp-section--active {
+  background: var(--accent-soft);
+}
+
+.rp-section-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 3px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rp-section--active .rp-section-title {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.rp-ann {
+  display: flex;
+  gap: 6px;
+  margin-top: 5px;
+  padding-left: 4px;
+}
+
+.rp-ann-stripe {
+  width: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  align-self: stretch;
+  min-height: 12px;
+}
+
+.rp-ann-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rp-ann-text {
+  font-size: 11.5px;
+  color: var(--text);
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.rp-ann-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.rp-note {
+  display: flex;
+  gap: 6px;
+  margin-top: 5px;
+  padding-left: 4px;
+}
+
+.rp-note-stripe {
+  width: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  align-self: stretch;
+  min-height: 12px;
+  background: var(--border-medium, rgba(0,0,0,0.15));
+}
+
+/* ── Citation / Meta panel header ──────────────────────────────── */
 
 .cp-header {
   display: flex;
@@ -917,6 +1184,24 @@ function openOrcid(orcid: string) {
   text-transform: uppercase;
   letter-spacing: 0.09em;
   color: var(--text-secondary);
+}
+
+.cp-back {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  transition: background var(--t), color var(--t);
+}
+.cp-back:hover {
+  background: var(--bg-chrome-active);
+  color: var(--text);
 }
 
 .cp-close {
@@ -1017,21 +1302,7 @@ function openOrcid(orcid: string) {
 }
 .cp-detail-btn:hover { opacity: 0.86; }
 
-.panel-enter-active,
-.panel-leave-active {
-  transition: transform var(--t), opacity var(--t);
-}
-.panel-enter-from,
-.panel-leave-to {
-  transform: translateX(100%);
-  opacity: 0;
-}
-
-/* ── Metadata panel ──────────────────────────────────────────── */
-
-.meta-panel {
-  border-left-color: var(--border-medium);
-}
+/* ── Metadata panel body ─────────────────────────────────────── */
 
 .mp-body {
   gap: 12px;
@@ -1212,6 +1483,135 @@ function openOrcid(orcid: string) {
 }
 
 .tt-cta:hover { text-decoration: underline; }
+
+/* ── Paste draft modal ───────────────────────────────────────── */
+
+.paste-draft-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: rgba(0,0,0,0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.paste-draft-modal {
+  width: 560px;
+  max-width: calc(100vw - 40px);
+  background: rgba(255,255,255,0.98);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.18), 0 4px 12px rgba(0,0,0,0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+}
+
+.pdm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pdm-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pdm-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: background 0.15s, color 0.15s;
+}
+.pdm-close:hover { background: var(--bg-chrome, #EDECEA); color: var(--text); }
+
+.pdm-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.pdm-hint code {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 11px;
+  background: var(--bg-chrome, #EDECEA);
+  border-radius: 3px;
+  padding: 1px 4px;
+  color: var(--accent, #0A5FBF);
+}
+
+.pdm-textarea {
+  width: 100%;
+  height: 280px;
+  padding: 10px 12px;
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg-chrome, #EDECEA);
+  border: 1.5px solid var(--border, rgba(0,0,0,0.09));
+  border-radius: 8px;
+  outline: none;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.pdm-textarea:focus { border-color: var(--accent, #0A5FBF); }
+
+.pdm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.pdm-import {
+  background: var(--accent, #0A5FBF);
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.pdm-import:hover:not(:disabled) { opacity: 0.88; }
+.pdm-import:disabled { opacity: 0.4; cursor: default; }
+
+.pdm-cancel {
+  background: none;
+  border: 1px solid var(--border-medium, rgba(0,0,0,0.12));
+  border-radius: 7px;
+  padding: 7px 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.pdm-cancel:hover { background: var(--bg-chrome, #EDECEA); }
+
+.modal-fade-enter-active,
+.modal-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.modal-fade-enter-from,
+.modal-fade-leave-to {
+  opacity: 0;
+}
 
 /* ── Find & Replace bar ──────────────────────────────────────── */
 

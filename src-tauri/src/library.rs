@@ -178,6 +178,14 @@ fn attachments_dir(item_id: i64) -> PathBuf {
         .join(item_id.to_string())
 }
 
+fn project_folder(project_id: i64) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".quire")
+        .join("projects")
+        .join(project_id.to_string())
+}
+
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
 fn open_conn() -> Result<Connection, String> {
@@ -293,11 +301,30 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             annotation_id INTEGER NOT NULL,
             position      INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (section_id, annotation_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS project_notes (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            body       TEXT    NOT NULL DEFAULT '',
+            code       TEXT,
+            language   TEXT,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS section_notes (
+            section_id INTEGER NOT NULL REFERENCES project_sections(id) ON DELETE CASCADE,
+            note_id    INTEGER NOT NULL REFERENCES project_notes(id)    ON DELETE CASCADE,
+            position   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (section_id, note_id)
         );",
     )
     .map_err(|e| e.to_string())?;
-    // Migration: add note column if it doesn't exist yet
+    // Migrations: add columns if they don't exist yet
     let _ = conn.execute_batch("ALTER TABLE section_annotations ADD COLUMN note TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'draft';");
+    let _ = conn.execute_batch("ALTER TABLE projects ADD COLUMN target_venue TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE projects ADD COLUMN doc_path TEXT;");
     Ok(())
 }
 
@@ -441,6 +468,17 @@ pub fn init_library(bib_entries: &[BibEntry]) {
     let Ok(conn) = open_conn() else { return };
     if init_schema(&conn).is_err() {
         return;
+    }
+    // Ensure project folders exist for all existing projects (idempotent)
+    if let Ok(mut stmt) = conn.prepare("SELECT id FROM projects") {
+        if let Ok(ids) = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .map(|it| it.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        {
+            for id in ids {
+                let _ = fs::create_dir_all(project_folder(id));
+            }
+        }
     }
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
@@ -917,6 +955,28 @@ pub fn export_bib_file(item_ids: Vec<i64>, path: String) -> Result<usize, String
     Ok(count)
 }
 
+#[tauri::command]
+pub fn get_bib_text_for_items(item_ids: Vec<i64>) -> Result<String, String> {
+    if item_ids.is_empty() { return Ok(String::new()); }
+    let conn = open_conn()?;
+    let placeholders: Vec<String> = (1..=item_ids.len()).map(|i| format!("?{i}")).collect();
+    let sql = format!(
+        "{} WHERE i.id IN ({}) GROUP BY i.id ORDER BY i.added_at ASC",
+        ITEM_SELECT,
+        placeholders.join(",")
+    );
+    let binds: Vec<Value> = item_ids.iter().map(|&id| Value::Integer(id)).collect();
+    let refs: Vec<&dyn rusqlite::types::ToSql> =
+        binds.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let items: Vec<LibraryItem> = stmt
+        .query_map(refs.as_slice(), |row| row_to_item(row))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(items_to_bib(&items))
+}
+
 // ── Metadata fetch helpers ────────────────────────────────────────────────────
 
 fn strip_xml_tags(s: &str) -> String {
@@ -1219,6 +1279,51 @@ pub async fn fetch_isbn_metadata(isbn: String) -> Result<FetchedMetadata, String
 
 // ── Attachments ───────────────────────────────────────────────────────────────
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentWithItem {
+    pub id:           i64,
+    pub item_id:      i64,
+    pub file_name:    String,
+    pub added_at:     i64,
+    pub item_title:   Option<String>,
+    pub item_authors: Option<String>,
+    pub item_year:    Option<String>,
+    pub item_key:     String,
+}
+
+#[tauri::command]
+pub fn get_all_attachments_with_item() -> Result<Vec<AttachmentWithItem>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT att.id, att.item_id, att.file_name, att.added_at,
+                    i.title, i.authors, i.year, i.key
+             FROM attachments att
+             JOIN items i ON i.id = att.item_id
+             WHERE i.id NOT IN (SELECT item_id FROM trash)
+             ORDER BY COALESCE(i.title, i.key) COLLATE NOCASE, att.added_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(AttachmentWithItem {
+                id:           row.get(0)?,
+                item_id:      row.get(1)?,
+                file_name:    row.get(2)?,
+                added_at:     row.get(3)?,
+                item_title:   row.get(4)?,
+                item_authors: row.get(5)?,
+                item_year:    row.get(6)?,
+                item_key:     row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
 #[tauri::command]
 pub async fn pick_and_attach_file(
     app: tauri::AppHandle,
@@ -1442,6 +1547,10 @@ pub struct Project {
     pub id: i64,
     pub name: String,
     pub created_at: i64,
+    pub status: String,
+    pub target_venue: Option<String>,
+    pub doc_path: Option<String>,
+    pub folder_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1453,6 +1562,23 @@ pub struct SectionAnnotationEntry {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct SectionNoteEntry {
+    pub note_id: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectNote {
+    pub id: i64,
+    pub project_id: i64,
+    pub body: String,
+    pub code: Option<String>,
+    pub language: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectSection {
     pub id: i64,
     pub project_id: i64,
@@ -1460,18 +1586,36 @@ pub struct ProjectSection {
     pub position: i64,
     pub note: Option<String>,
     pub annotations: Vec<SectionAnnotationEntry>,
+    pub note_entries: Vec<SectionNoteEntry>,
 }
+
+// ── Workbench helpers ─────────────────────────────────────────────────────────
+
+fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
+    let id: i64 = row.get(0)?;
+    Ok(Project {
+        id,
+        name:         row.get(1)?,
+        created_at:   row.get(2)?,
+        status:       row.get(3)?,
+        target_venue: row.get(4)?,
+        doc_path:     row.get(5)?,
+        folder_path:  project_folder(id).to_string_lossy().into_owned(),
+    })
+}
+
+const PROJECT_SELECT: &str =
+    "SELECT id, name, created_at, status, target_venue, doc_path FROM projects";
 
 // ── Workbench commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn get_projects() -> Result<Vec<Project>, String> {
     let conn = open_conn()?;
-    let mut stmt = conn
-        .prepare("SELECT id, name, created_at FROM projects ORDER BY created_at DESC")
-        .map_err(|e| e.to_string())?;
+    let sql = format!("{} ORDER BY created_at DESC", PROJECT_SELECT);
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |row| Ok(Project { id: row.get(0)?, name: row.get(1)?, created_at: row.get(2)? }))
+        .query_map([], row_to_project)
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -1484,12 +1628,10 @@ pub fn create_project(name: String) -> Result<Project, String> {
     conn.execute("INSERT INTO projects (name) VALUES (?1)", [&name])
         .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
-    conn.query_row(
-        "SELECT id, name, created_at FROM projects WHERE id=?1",
-        [id],
-        |row| Ok(Project { id: row.get(0)?, name: row.get(1)?, created_at: row.get(2)? }),
-    )
-    .map_err(|e| e.to_string())
+    fs::create_dir_all(project_folder(id)).map_err(|e| e.to_string())?;
+    let sql = format!("{} WHERE id=?1", PROJECT_SELECT);
+    conn.query_row(&sql, [id], row_to_project)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1505,6 +1647,32 @@ pub fn rename_project(id: i64, name: String) -> Result<(), String> {
     let conn = open_conn()?;
     conn.execute("UPDATE projects SET name=?1 WHERE id=?2", params![name, id])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_project_meta(
+    id: i64,
+    status: String,
+    target_venue: Option<String>,
+) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "UPDATE projects SET status=?1, target_venue=?2 WHERE id=?3",
+        params![status, target_venue, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_project_doc_path(id: i64, doc_path: Option<String>) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "UPDATE projects SET doc_path=?1 WHERE id=?2",
+        params![doc_path, id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1574,7 +1742,17 @@ pub fn get_project_sections(project_id: i64) -> Result<Vec<ProjectSection>, Stri
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        sections.push(ProjectSection { id, project_id: proj_id, title, position, note, annotations: entries });
+        let mut note_stmt = conn
+            .prepare(
+                "SELECT note_id FROM section_notes WHERE section_id=?1 ORDER BY position",
+            )
+            .map_err(|e| e.to_string())?;
+        let note_entries: Vec<SectionNoteEntry> = note_stmt
+            .query_map([id], |r| Ok(SectionNoteEntry { note_id: r.get(0)? }))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        sections.push(ProjectSection { id, project_id: proj_id, title, position, note, annotations: entries, note_entries });
     }
     Ok(sections)
 }
@@ -1588,7 +1766,7 @@ pub fn create_project_section(project_id: i64, title: String, position: i64) -> 
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
-    Ok(ProjectSection { id, project_id, title, position, note: None, annotations: vec![] })
+    Ok(ProjectSection { id, project_id, title, position, note: None, annotations: vec![], note_entries: vec![] })
 }
 
 #[tauri::command]
@@ -1662,6 +1840,112 @@ pub fn update_section_annotation_note(
     conn.execute(
         "UPDATE section_annotations SET note=?1 WHERE section_id=?2 AND annotation_id=?3",
         params![note, section_id, annotation_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_project_notes(project_id: i64) -> Result<Vec<ProjectNote>, String> {
+    let conn = open_conn()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, project_id, body, code, language, created_at
+             FROM project_notes WHERE project_id=?1 ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let notes = stmt
+        .query_map([project_id], |r| Ok(ProjectNote {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            body: r.get(2)?,
+            code: r.get(3)?,
+            language: r.get(4)?,
+            created_at: r.get(5)?,
+        }))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(notes)
+}
+
+#[tauri::command]
+pub fn create_project_note(
+    project_id: i64,
+    body: String,
+    code: Option<String>,
+    language: Option<String>,
+) -> Result<ProjectNote, String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "INSERT INTO project_notes (project_id, body, code, language) VALUES (?1, ?2, ?3, ?4)",
+        params![project_id, body, code, language],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    conn.query_row(
+        "SELECT id, project_id, body, code, language, created_at FROM project_notes WHERE id=?1",
+        [id],
+        |r| Ok(ProjectNote {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            body: r.get(2)?,
+            code: r.get(3)?,
+            language: r.get(4)?,
+            created_at: r.get(5)?,
+        }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_project_note(
+    id: i64,
+    body: String,
+    code: Option<String>,
+    language: Option<String>,
+) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "UPDATE project_notes SET body=?1, code=?2, language=?3 WHERE id=?4",
+        params![body, code, language, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_project_note(id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute("DELETE FROM project_notes WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_note_to_section(section_id: i64, note_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    let pos: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM section_notes WHERE section_id=?1",
+            [section_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT OR IGNORE INTO section_notes (section_id, note_id, position) VALUES (?1, ?2, ?3)",
+        params![section_id, note_id, pos],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_note_from_section(section_id: i64, note_id: i64) -> Result<(), String> {
+    let conn = open_conn()?;
+    conn.execute(
+        "DELETE FROM section_notes WHERE section_id=?1 AND note_id=?2",
+        params![section_id, note_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

@@ -17,18 +17,85 @@ const router = useRouter()
 
 const attachmentId = computed(() => Number(route.query.id))
 const itemId       = computed(() => Number(route.query.itemId))
-const fileName     = computed(() => (route.query.name as string) || 'PDF Viewer')
+const fileName     = computed(() => (route.query.name as string) || '')
+const pdfTitle     = computed(() => (route.query.title as string) || fileName.value || 'PDF Viewer')
+
+// ── Browser state ──────────────────────────────────────────────────────────────
+
+interface AttachmentWithItem {
+  id:           number
+  itemId:       number
+  fileName:     string
+  addedAt:      number
+  itemTitle?:   string
+  itemAuthors?: string
+  itemYear?:    string
+  itemKey:      string
+}
+
+interface AttGroup {
+  itemId:      number
+  title:       string
+  sub:         string
+  attachments: AttachmentWithItem[]
+}
+
+const showBrowser    = ref(false)
+const allAttachments = ref<AttachmentWithItem[]>([])
+
+const groupedAttachments = computed<AttGroup[]>(() => {
+  const map = new Map<number, AttGroup>()
+  for (const a of allAttachments.value) {
+    if (!map.has(a.itemId)) {
+      map.set(a.itemId, {
+        itemId:      a.itemId,
+        title:       a.itemTitle ?? a.itemKey,
+        sub:         [shortAuthors(a.itemAuthors), a.itemYear].filter(Boolean).join(' · '),
+        attachments: [],
+      })
+    }
+    map.get(a.itemId)!.attachments.push(a)
+  }
+  return [...map.values()]
+})
+
+function shortAuthors(authors?: string): string {
+  if (!authors) return ''
+  const parts = authors.split(/[,;&]|and\s/i).map(s => s.trim()).filter(Boolean)
+  if (!parts.length) return ''
+  const last = parts[0].split(/\s+/).pop() ?? parts[0]
+  return parts.length > 2 ? `${last} et al.`
+    : parts.length === 2 ? `${last} & ${parts[1].split(/\s+/).pop() ?? parts[1]}`
+    : last
+}
+
+async function openAttachment(att: AttachmentWithItem) {
+  const sameFile = att.id === attachmentId.value && !!pdfDoc.value
+  showBrowser.value = false
+  router.replace({ path: '/pdf', query: {
+    id:     att.id,
+    itemId: att.itemId,
+    name:   att.fileName,
+    title:  att.itemTitle ?? att.itemKey,
+  }})
+  if (sameFile) {
+    // attachmentId didn't change → watch won't fire → re-render into the freshly mounted canvas
+    await nextTick()
+    await renderPage(currentPage.value)
+    renderAnnotationOverlay()
+  }
+}
 
 // ── PDF state ──────────────────────────────────────────────────────────────────
 
 // shallowRef prevents Vue from Proxy-wrapping the pdfjs document instance.
 // pdfjs v5 uses private class fields (#field) which break when accessed through a Proxy.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const pdfDoc = shallowRef<any>(null)
+const pdfDoc      = shallowRef<any>(null)
 const currentPage = ref(1)
 const totalPages  = ref(0)
 const scale       = ref(1.5)
-const loading     = ref(true)
+const loading     = ref(false)
 const pdfError    = ref('')
 
 // ── DOM refs ───────────────────────────────────────────────────────────────────
@@ -79,14 +146,13 @@ async function loadPdf() {
     const uint8 = new Uint8Array(bytes)
     pdfDoc.value = await pdfjsLib.getDocument({ data: uint8 }).promise
     totalPages.value = pdfDoc.value.numPages
-    // Persist last-opened PDF so the tab restores it on next visit
     localStorage.setItem(LAST_PDF_KEY, JSON.stringify({
       id:     attachmentId.value,
       itemId: itemId.value,
       name:   fileName.value,
+      title:  pdfTitle.value,
+      page:   1,
     }))
-    // Must set loading = false and await nextTick so the canvas enters the DOM
-    // before we try to render into it (canvas is inside v-else)
     loading.value = false
     await nextTick()
     const startPage = route.query.page ? Math.max(1, Number(route.query.page)) : 1
@@ -106,10 +172,18 @@ async function renderPage(pageNum: number) {
   currentPage.value = pageNum
   floatingToolbar.value = null
 
+  // Persist current page so "resume where left off" works
+  try {
+    const saved = localStorage.getItem(LAST_PDF_KEY)
+    if (saved) {
+      const data = JSON.parse(saved)
+      localStorage.setItem(LAST_PDF_KEY, JSON.stringify({ ...data, page: pageNum }))
+    }
+  } catch { /* ignore */ }
+
   const page     = await pdfDoc.value.getPage(pageNum)
   const viewport = page.getViewport({ scale: scale.value })
 
-  // Canvas
   const canvas = canvasEl.value
   const ctx    = canvas.getContext('2d')!
   canvas.width  = viewport.width
@@ -118,11 +192,8 @@ async function renderPage(pageNum: number) {
   pageContainerEl.value.style.height = viewport.height + 'px'
   await page.render({ canvasContext: ctx, viewport }).promise
 
-  // Text layer — pdfjs v5 uses the TextLayer class; renderTextLayer was removed
   const textLayer = textLayerEl.value
   textLayer.innerHTML = ''
-  // --total-scale-factor must be set BEFORE TextLayer constructor so that the
-  // CSS calc() dimensions resolve correctly when the browser lays out the container.
   textLayer.style.setProperty('--total-scale-factor', String(scale.value))
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -135,8 +206,6 @@ async function renderPage(pageNum: number) {
   } catch (e) {
     console.warn('[pdf] text layer:', e)
   }
-  // Force explicit pixel dimensions so the container always matches the canvas,
-  // even if the CSS-variable calc produced a slightly different rounding.
   textLayer.style.width  = viewport.width  + 'px'
   textLayer.style.height = viewport.height + 'px'
 
@@ -175,7 +244,6 @@ watch(pageAnnotations, renderAnnotationOverlay)
 // ── Text selection → floating toolbar ─────────────────────────────────────────
 
 function onMouseUp(event: MouseEvent) {
-  // Clicks inside the toolbar itself must not dismiss it
   if ((event.target as HTMLElement).closest('.ann-toolbar')) return
 
   const sel = window.getSelection()
@@ -206,7 +274,6 @@ function onMouseUp(event: MouseEvent) {
   }
   if (!rects.length) return
 
-  // Position toolbar centred on mouse X, above the top of the selection
   floatingToolbar.value = {
     x: event.clientX,
     y: minTop - 52,
@@ -238,12 +305,11 @@ function prevPage() { if (currentPage.value > 1) renderPage(currentPage.value - 
 function nextPage() { if (currentPage.value < totalPages.value) renderPage(currentPage.value + 1) }
 function zoomIn()  { scale.value = Math.min(scale.value + 0.25, 3); renderPage(currentPage.value) }
 function zoomOut() { scale.value = Math.max(scale.value - 0.25, 0.5); renderPage(currentPage.value) }
-function goBack()  { router.back() }
 
 // ── Inline note editing ────────────────────────────────────────────────────────
 
 function startEditNote(ann: Annotation) {
-  editingNoteId.value  = ann.id
+  editingNoteId.value   = ann.id
   editingNoteText.value = ann.noteText ?? ''
 }
 async function saveNote(id: number) {
@@ -264,7 +330,7 @@ function jumpToPage(page: number) {
   if (page !== currentPage.value) renderPage(page)
 }
 
-// ── Standalone note (no text selection) ───────────────────────────────────────
+// ── Standalone note ────────────────────────────────────────────────────────────
 
 async function addStandaloneNote() {
   const input: AnnotationInput = {
@@ -280,20 +346,27 @@ async function addStandaloneNote() {
   startEditNote(ann)
 }
 
-// ── Global mouse listener ──────────────────────────────────────────────────────
+// ── Mount / unmount ────────────────────────────────────────────────────────────
 
-onMounted(() => {
+onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp)
-  // If no attachment ID in route, restore the last-viewed PDF
+
+  // Always pre-load the attachment list so the browser is ready instantly
+  try {
+    allAttachments.value = await invoke<AttachmentWithItem[]>('get_all_attachments_with_item')
+  } catch { /* no attachments yet */ }
+
   if (!attachmentId.value) {
     try {
       const saved = localStorage.getItem(LAST_PDF_KEY)
       if (saved) {
-        const { id, itemId: iid, name } = JSON.parse(saved)
-        router.replace({ path: '/pdf', query: { id, itemId: iid, name } })
-        return  // watch(attachmentId) will trigger loadPdf once query is set
+        const { id, itemId: iid, name, title: t, page: p } = JSON.parse(saved)
+        router.replace({ path: '/pdf', query: { id, itemId: iid, name, title: t, page: p ?? 1 } })
+        return  // watch(attachmentId) fires loadPdf once query is set
       }
-    } catch { /* corrupt localStorage — ignore */ }
+    } catch { /* corrupt entry — fall through to browser */ }
+    showBrowser.value = true
+    return
   }
   loadPdf()
 })
@@ -313,14 +386,20 @@ watch(attachmentId, () => {
 
     <!-- ── Header ────────────────────────────────────────────────────────────── -->
     <div class="pdf-header">
-      <button class="back-btn" @click="goBack" title="Back to library">
-        <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+
+      <!-- "← All PDFs" shown only when a PDF is loaded / loading -->
+      <button v-if="!showBrowser" class="back-btn" @click="showBrowser = true">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
           <path d="M8 2L3 6.5l5 4.5"/>
         </svg>
-        Library
+        All PDFs
       </button>
-      <span class="pdf-title">{{ fileName || 'PDF Viewer' }}</span>
-      <div class="pdf-controls">
+
+      <span class="pdf-title">{{ showBrowser ? 'All PDFs' : pdfTitle }}</span>
+
+      <!-- PDF controls — only in viewer mode -->
+      <div v-if="!showBrowser" class="pdf-controls">
         <button class="ctrl-btn" @click="zoomOut" title="Zoom out">−</button>
         <span class="zoom-label">{{ Math.round(scale * 100) }}%</span>
         <button class="ctrl-btn" @click="zoomIn"  title="Zoom in">+</button>
@@ -333,7 +412,7 @@ watch(attachmentId, () => {
               :value="currentPage"
               :min="1"
               :max="totalPages"
-              @change="renderPage(Number(($event.target as HTMLInputElement).value))"
+              @change="renderPage(Math.max(1, Math.min(totalPages, Number(($event.target as HTMLInputElement).value))))"
             />
             <span class="page-sep">/ {{ totalPages }}</span>
           </span>
@@ -342,20 +421,81 @@ watch(attachmentId, () => {
       </div>
     </div>
 
-    <!-- ── Body ──────────────────────────────────────────────────────────────── -->
-    <div class="pdf-body">
+    <!-- ── Browser ────────────────────────────────────────────────────────────── -->
+    <div v-if="showBrowser" class="pdf-browser">
+
+      <div v-if="allAttachments.length === 0" class="browser-empty">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="currentColor"
+             stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
+          <rect x="7" y="3" width="22" height="30" rx="2"/>
+          <path d="M12 11h12M12 17h12M12 23h8"/>
+        </svg>
+        <p>No PDFs yet</p>
+        <p class="browser-empty-hint">Attach a PDF to a library item to see it here</p>
+      </div>
+
+      <div v-else class="browser-list">
+        <div
+          v-for="group in groupedAttachments"
+          :key="group.itemId"
+          class="browser-group"
+        >
+          <!-- Group header: clickable only when there's exactly one PDF (saves a click) -->
+          <div
+            class="browser-group-header"
+            :class="{ 'header-clickable': group.attachments.length === 1 }"
+            @click="group.attachments.length === 1 && openAttachment(group.attachments[0])"
+          >
+            <div class="browser-group-title">{{ group.title }}</div>
+            <div class="browser-group-sub">{{ group.sub }}</div>
+            <svg
+              v-if="group.attachments.length === 1"
+              class="header-arrow"
+              width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+              stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 2l4 4-4 4"/>
+            </svg>
+            <span v-else class="browser-group-count">{{ group.attachments.length }} files</span>
+          </div>
+
+          <!-- Sub-rows when item has multiple PDFs -->
+          <template v-if="group.attachments.length > 1">
+            <button
+              v-for="att in group.attachments"
+              :key="att.id"
+              class="browser-att-row"
+              @click="openAttachment(att)"
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                   stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" class="att-icon">
+                <rect x="2" y="1" width="8" height="10" rx="1"/>
+                <path d="M4 4h4M4 6h4M4 8h2"/>
+              </svg>
+              <span class="att-name">{{ att.fileName }}</span>
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"
+                   stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="att-arrow">
+                <path d="M3 2l4 3-4 3"/>
+              </svg>
+            </button>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Viewer ─────────────────────────────────────────────────────────────── -->
+    <div v-else class="pdf-body">
 
       <!-- PDF canvas area -->
       <div class="pdf-scroll">
         <div v-if="loading" class="pdf-loading">Loading…</div>
         <div v-else-if="pdfError" class="pdf-error">{{ pdfError }}</div>
         <div v-else-if="!pdfDoc" class="pdf-empty-state">
-          <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
+          <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="currentColor"
+               stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
             <rect x="8" y="4" width="24" height="32" rx="2"/>
             <path d="M14 13h12M14 19h12M14 25h8"/>
           </svg>
           <p>No PDF open</p>
-          <p class="pdf-empty-hint">Open a PDF from the library</p>
         </div>
         <div v-else class="page-wrap">
           <div class="page-container" ref="pageContainerEl" @dragstart.prevent>
@@ -388,7 +528,8 @@ watch(attachmentId, () => {
       <!-- Right panel: annotations list -->
       <div class="ann-panel">
         <div class="ann-panel-header">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+               stroke-width="1.5" stroke-linecap="round">
             <path d="M1 2h10M1 5h10M1 8h6"/>
           </svg>
           Annotations
@@ -442,6 +583,7 @@ watch(attachmentId, () => {
         </div>
       </div>
     </div>
+
   </div>
 </template>
 
@@ -478,6 +620,7 @@ watch(attachmentId, () => {
   padding: 4px 6px;
   border-radius: var(--radius-sm);
   transition: background var(--t), color var(--t);
+  flex-shrink: 0;
 }
 .back-btn:hover { background: var(--bg-document); color: var(--text); }
 
@@ -524,17 +667,9 @@ watch(attachmentId, () => {
   font-variant-numeric: tabular-nums;
 }
 
-.page-nav {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
+.page-nav { display: flex; align-items: center; gap: 4px; }
 
-.page-counter {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-}
+.page-counter { display: flex; align-items: center; gap: 3px; }
 
 .page-input {
   width: 36px;
@@ -550,13 +685,112 @@ watch(attachmentId, () => {
 }
 .page-input::-webkit-inner-spin-button { display: none; }
 
-.page-sep {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  font-variant-numeric: tabular-nums;
+.page-sep { font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+
+/* ── Browser ─────────────────────────────────────────────────────────────────── */
+
+.pdf-browser {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg);
 }
 
-/* ── Body ────────────────────────────────────────────────────────────────────── */
+.browser-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 80px 40px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+.browser-empty p { margin: 0; font-size: 13px; }
+.browser-empty-hint { font-size: 11.5px; opacity: 0.7; }
+
+.browser-list { padding: 8px 0; }
+
+.browser-group { border-bottom: 1px solid var(--border); }
+.browser-group:last-child { border-bottom: none; }
+
+.browser-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 18px 10px;
+  background: var(--bg);
+}
+
+.browser-group-header.header-clickable {
+  cursor: pointer;
+  transition: background var(--t);
+}
+.browser-group-header.header-clickable:hover {
+  background: var(--bg-chrome);
+}
+
+.browser-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-group-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.browser-group-count {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  background: var(--bg-chrome-active);
+  border-radius: 9px;
+  padding: 1px 7px;
+  flex-shrink: 0;
+}
+
+.header-arrow {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.browser-att-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 18px 7px 34px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  border-top: 1px solid var(--border);
+  transition: background var(--t);
+  font-family: var(--font-ui);
+}
+.browser-att-row:hover { background: var(--bg-chrome); }
+
+.att-icon { color: var(--text-tertiary); flex-shrink: 0; }
+
+.att-name {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.att-arrow { color: var(--text-tertiary); flex-shrink: 0; opacity: 0; transition: opacity var(--t); }
+.browser-att-row:hover .att-arrow { opacity: 1; }
+
+/* ── Viewer body ─────────────────────────────────────────────────────────────── */
 
 .pdf-body {
   display: flex;
@@ -565,7 +799,6 @@ watch(attachmentId, () => {
   position: relative;
 }
 
-/* PDF scroll area */
 .pdf-scroll {
   flex: 1;
   overflow: auto;
@@ -577,8 +810,7 @@ watch(attachmentId, () => {
   min-width: 0;
 }
 
-.pdf-loading,
-.pdf-error {
+.pdf-loading, .pdf-error {
   font-size: 13px;
   color: var(--text-tertiary);
   margin-top: 48px;
@@ -593,35 +825,19 @@ watch(attachmentId, () => {
   margin-top: 80px;
   color: var(--text-tertiary);
 }
-.pdf-empty-state p {
-  margin: 0;
-  font-size: 13px;
-}
-.pdf-empty-hint {
-  font-size: 11px;
-  opacity: 0.7;
-}
+.pdf-empty-state p { margin: 0; font-size: 13px; }
 
-.page-wrap {
-  box-shadow: var(--shadow-lg);
-}
+.page-wrap { box-shadow: var(--shadow-lg); }
 
 .page-container {
   position: relative;
   display: inline-block;
 }
-
-.page-container canvas {
-  display: block;
-}
-
-.page-container canvas { z-index: 1; }
+.page-container canvas { display: block; z-index: 1; }
 
 .text-layer {
   position: absolute;
   top: 0; left: 0;
-  /* overflow:clip clips without creating a scroll container — overflow:hidden
-     blocks text-selection drag in Chromium/WebView2 */
   overflow: clip;
   pointer-events: auto;
   -webkit-user-select: text;
@@ -631,12 +847,10 @@ watch(attachmentId, () => {
   line-height: 1;
   text-size-adjust: none;
   forced-color-adjust: none;
-  /* pdfjs v5 CSS variable chain: --total-scale-factor is set per page via JS  */
   --total-scale-factor: 1;
   --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size, 1));
 }
 
-/* pdfjs v5 text spans: positioned by %, sized by CSS variable chain */
 .text-layer :deep(span),
 .text-layer :deep(br) {
   color: transparent;
@@ -648,7 +862,6 @@ watch(attachmentId, () => {
   user-select: text;
 }
 
-/* pdfjs v5: font-size and transform driven by CSS variables set inline per span */
 .text-layer :deep(span) {
   --font-height: 0;
   font-size: calc(var(--text-scale-factor) * var(--font-height));
@@ -663,7 +876,6 @@ watch(attachmentId, () => {
   color: transparent;
 }
 
-/* Annotation highlight overlay — above text-layer visually, no pointer events */
 .ann-layer {
   position: absolute;
   top: 0; left: 0;
@@ -694,7 +906,6 @@ watch(attachmentId, () => {
   to   { opacity: 1; transform: translateX(-50%) scale(1); }
 }
 
-/* Separator between colors and actions */
 .ann-toolbar::after {
   content: '';
   width: 1px;
@@ -712,13 +923,9 @@ watch(attachmentId, () => {
   transition: transform 0.1s, box-shadow 0.1s;
   box-shadow: 0 1px 3px rgba(0,0,0,0.3);
 }
-.ann-color-btn:hover {
-  transform: scale(1.2);
-  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-}
+.ann-color-btn:hover { transform: scale(1.2); box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
 
-.ann-underline-btn,
-.ann-close-btn {
+.ann-underline-btn, .ann-close-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -768,11 +975,7 @@ watch(attachmentId, () => {
   white-space: nowrap;
   transition: background var(--t), color var(--t), border-color var(--t);
 }
-.add-note-btn:hover {
-  background: var(--bg-document);
-  border-color: var(--accent);
-  color: var(--accent);
-}
+.add-note-btn:hover { background: var(--bg-document); border-color: var(--accent); color: var(--accent); }
 
 .ann-count {
   background: var(--accent);
@@ -812,32 +1015,11 @@ watch(attachmentId, () => {
 .ann-item:hover { box-shadow: var(--shadow-xs); }
 .ann-item.current-page { border-color: var(--accent); }
 
-.ann-item-header {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-bottom: 5px;
-}
+.ann-item-header { display: flex; align-items: center; gap: 5px; margin-bottom: 5px; }
 
-.ann-color-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.ann-page-tag {
-  font-size: 10px;
-  color: var(--text-tertiary);
-  font-variant-numeric: tabular-nums;
-}
-
-.ann-type-tag {
-  font-size: 9.5px;
-  color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
+.ann-color-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.ann-page-tag  { font-size: 10px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.ann-type-tag  { font-size: 9.5px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.03em; }
 
 .ann-del-btn {
   margin-left: auto;

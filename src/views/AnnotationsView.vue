@@ -75,7 +75,7 @@ function cancelEdit() {
 function openInPdf(a: AnnotationWithSource) {
   router.push({
     name: 'pdf',
-    query: { id: a.attachmentId, itemId: a.itemId, name: a.attachmentFileName, page: a.page },
+    query: { id: a.attachmentId, itemId: a.itemId, name: a.attachmentFileName, title: a.itemTitle, page: a.page },
   })
 }
 

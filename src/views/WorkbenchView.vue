@@ -2,8 +2,9 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
-import { useWorkbench, type ProjectSection } from '../composables/useWorkbench'
+import { useWorkbench, type ProjectSection, type ProjectNote } from '../composables/useWorkbench'
 import { useAllAnnotations, type AnnotationWithSource } from '../composables/useAnnotations'
+import { emitter } from '../events'
 
 const router = useRouter()
 
@@ -70,34 +71,126 @@ function closePicker() {
   pickerQuery.value = ''
 }
 
-// ── New project form ──────────────────────────────────────────────────────────
+// ── Export .bib ───────────────────────────────────────────────────────────────
 
-const newProjectOpen = ref(false)
-const newProjectName = ref('')
+const exportStatus = ref<'idle' | 'ok' | 'err'>('idle')
+let exportTimer: ReturnType<typeof setTimeout> | null = null
 
-async function submitNewProject() {
-  const name = newProjectName.value.trim()
-  if (!name) return
-  await wb.createProject(name)
-  newProjectName.value = ''
-  newProjectOpen.value = false
+async function exportBib() {
+  const ids = wb.sourceIds.value
+  if (!ids.length) return
+  try {
+    const saved = await invoke<boolean>('export_project_bib_dialog', {
+      itemIds: ids,
+      projectName: wb.currentProject.value?.name ?? 'project',
+    })
+    exportStatus.value = saved ? 'ok' : 'idle'
+  } catch {
+    exportStatus.value = 'err'
+  }
+  if (exportTimer) clearTimeout(exportTimer)
+  exportTimer = setTimeout(() => { exportStatus.value = 'idle' }, 2000)
 }
 
-// ── Project rename ────────────────────────────────────────────────────────────
+// ── Copy for AI ───────────────────────────────────────────────────────────────
 
-const renamingProject = ref(false)
-const renameDraft     = ref('')
+const copyStatus = ref<'idle' | 'ok'>('idle')
+let copyTimer: ReturnType<typeof setTimeout> | null = null
 
-function startRenameProject() {
-  renameDraft.value = wb.currentProject.value?.name ?? ''
-  renamingProject.value = true
-  nextTick(() => (document.querySelector('.rename-input') as HTMLInputElement | null)?.select())
+async function copyForAi() {
+  const project = wb.currentProject.value
+  if (!project) return
+
+  // Get .bib text for the project's sources
+  const bibText = wb.sourceIds.value.length
+    ? await invoke<string>('get_bib_text_for_items', { itemIds: wb.sourceIds.value })
+    : ''
+
+  const lines: string[] = []
+  lines.push('You are an academic writing assistant. Using the research outline and annotated sources below, write a complete academic paper draft.')
+  lines.push('Use [@citeKey] citation syntax wherever you reference a source. Return Markdown only — no preamble, no commentary.\n')
+  lines.push(`# Project: ${project.name}\n`)
+  lines.push('## Outline\n')
+
+  for (const sec of wb.sections.value) {
+    lines.push(`### ${sec.title}`)
+
+    if (sec.annotations.length) {
+      lines.push('\n**Annotations:**')
+      for (const entry of sec.annotations) {
+        const a = ann.allAnnotations.value.find(x => x.id === entry.annotationId)
+        if (!a) continue
+        const text = a.selectedText?.trim() || a.noteText?.trim() || ''
+        const cite = a.itemKey ? `[@${a.itemKey}]` : ''
+        const page = a.page ? ` p. ${a.page}` : ''
+        lines.push(`- "${text}"${cite ? ' ' + cite : ''}${page}`)
+        if (entry.note?.trim()) lines.push(`  → ${entry.note.trim()}`)
+      }
+    }
+
+    if (sec.noteEntries.length) {
+      lines.push('\n**Research notes:**')
+      for (const ne of sec.noteEntries) {
+        const n = wb.notes.value.find(x => x.id === ne.noteId)
+        if (!n) continue
+        lines.push(`- ${n.body}`)
+        if (n.code) lines.push(`  \`\`\`${n.language || ''}\n  ${n.code}\n  \`\`\``)
+      }
+    }
+
+    lines.push('')
+  }
+
+  // Project-level notes not assigned to any section
+  const unassignedNotes = wb.notes.value.filter(n => {
+    const used = new Set(wb.sections.value.flatMap(s => s.noteEntries.map(e => e.noteId)))
+    return !used.has(n.id)
+  })
+  if (unassignedNotes.length) {
+    lines.push('## General notes\n')
+    for (const n of unassignedNotes) lines.push(`- ${n.body}`)
+    lines.push('')
+  }
+
+  if (bibText.trim()) {
+    lines.push('---\n')
+    lines.push('## Bibliography\n')
+    lines.push(bibText)
+  }
+
+  await navigator.clipboard.writeText(lines.join('\n'))
+  copyStatus.value = 'ok'
+  if (copyTimer) clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => { copyStatus.value = 'idle' }, 2000)
 }
 
-async function commitRenameProject() {
-  const name = renameDraft.value.trim()
-  if (name && wb.currentId.value) await wb.renameProject(wb.currentId.value, name)
-  renamingProject.value = false
+// ── Write from sections ───────────────────────────────────────────────────────
+
+function writeFromSections() {
+  if (wb.sections.value.length) {
+    const html = wb.sections.value.map(s => `<h2>${s.title}</h2><p></p>`).join('')
+    emitter.emit('doc:opened', { path: '', content: html })
+  }
+  router.push('/write')
+}
+
+// ── Inline notes (below outline) ─────────────────────────────────────────────
+
+const quickNoteOpen = ref(false)
+const quickNoteBody = ref('')
+const quickNoteInput = ref<HTMLTextAreaElement | null>(null)
+
+async function submitQuickNote() {
+  const body = quickNoteBody.value.trim()
+  quickNoteOpen.value = false
+  quickNoteBody.value = ''
+  if (body) await wb.createNote(body)
+}
+
+function openQuickNote() {
+  quickNoteOpen.value = true
+  quickNoteBody.value = ''
+  nextTick(() => quickNoteInput.value?.focus())
 }
 
 // ── Section title editing ─────────────────────────────────────────────────────
@@ -135,19 +228,30 @@ async function submitAddSection() {
   addingSectionTitle.value = ''
 }
 
-// ── {{ trigger: annotation picker per section ────────────────────────────────
+// ── {{ trigger: annotation + note picker per section ─────────────────────────
+
+type Suggestion =
+  | { kind: 'annotation'; data: AnnotationWithSource }
+  | { kind: 'note';       data: ProjectNote }
 
 const sectionQuery    = ref<Record<number, string>>({})
 const activeSectionId = ref<number | null>(null)
 const focusedIdx      = ref(0)
 
-const suggestions = computed(() => {
+const droppedNoteIds = computed(() => {
+  const set = new Set<number>()
+  for (const s of wb.sections.value) s.noteEntries.forEach(e => set.add(e.noteId))
+  return set
+})
+
+const suggestions = computed((): Suggestion[] => {
   if (activeSectionId.value === null) return []
   const raw = sectionQuery.value[activeSectionId.value] ?? ''
   const trigger = raw.lastIndexOf('{{')
   if (trigger === -1) return []
   const search = raw.slice(trigger + 2).toLowerCase().trim()
-  return sourceAnnotations.value
+
+  const annSugs: Suggestion[] = sourceAnnotations.value
     .filter(a => !droppedIds.value.has(a.id))
     .filter(a =>
       !search ||
@@ -156,7 +260,20 @@ const suggestions = computed(() => {
       (a.itemTitle?.toLowerCase().includes(search)) ||
       (a.itemAuthors?.toLowerCase().includes(search))
     )
-    .slice(0, 8)
+    .slice(0, 6)
+    .map(a => ({ kind: 'annotation', data: a }))
+
+  const noteSugs: Suggestion[] = wb.notes.value
+    .filter(n => !droppedNoteIds.value.has(n.id))
+    .filter(n =>
+      !search ||
+      n.body.toLowerCase().includes(search) ||
+      (n.code?.toLowerCase().includes(search))
+    )
+    .slice(0, 4)
+    .map(n => ({ kind: 'note', data: n }))
+
+  return [...annSugs, ...noteSugs]
 })
 
 function onQueryInput(e: Event, sectionId: number) {
@@ -171,7 +288,6 @@ function onQueryFocus(sectionId: number) {
 }
 
 function onQueryBlur() {
-  // small delay so mousedown on suggestion fires first
   setTimeout(() => { activeSectionId.value = null }, 180)
 }
 
@@ -183,14 +299,18 @@ function clearQuery(sectionId: number) {
 function suggestDown() { focusedIdx.value = Math.min(focusedIdx.value + 1, suggestions.value.length - 1) }
 function suggestUp()   { focusedIdx.value = Math.max(focusedIdx.value - 1, 0) }
 
-async function selectSuggestion(sectionId: number, annId: number) {
-  await wb.dropAnnotation(sectionId, annId)
+async function selectSuggestion(sectionId: number, sug: Suggestion) {
+  if (sug.kind === 'annotation') {
+    await wb.dropAnnotation(sectionId, sug.data.id)
+  } else {
+    await wb.dropNote(sectionId, sug.data.id)
+  }
   clearQuery(sectionId)
 }
 
 async function selectFocused(sectionId: number) {
-  const a = suggestions.value[focusedIdx.value]
-  if (a) await selectSuggestion(sectionId, a.id)
+  const s = suggestions.value[focusedIdx.value]
+  if (s) await selectSuggestion(sectionId, s)
 }
 
 // ── Sidebar annotation groups ─────────────────────────────────────────────────
@@ -213,10 +333,60 @@ const sidebarGroups = computed<AnnGroup[]>(() => {
   return [...map.values()]
 })
 
-// ── Sidebar search ────────────────────────────────────────────────────────────
+// ── Sidebar tabs & search ─────────────────────────────────────────────────────
 
-const sidebarSearch = ref('')
+const sidebarSearch    = ref('')
 const sidebarCollapsed = ref(false)
+const sidebarTab       = ref<'literature' | 'notes'>('literature')
+
+// ── My Notes ─────────────────────────────────────────────────────────────────
+
+const newNoteBody     = ref('')
+const newNoteCode     = ref('')
+const newNoteLang     = ref('')
+const newNoteOpen     = ref(false)
+const editingNoteId   = ref<number | null>(null)
+const editNoteBody    = ref('')
+const editNoteCode    = ref('')
+const editNoteLang    = ref('')
+const expandedCodeIds = ref(new Set<number>())
+
+async function submitNewNote() {
+  const body = newNoteBody.value.trim()
+  if (!body) return
+  const code = newNoteCode.value.trim() || undefined
+  const lang = newNoteLang.value.trim() || undefined
+  await wb.createNote(body, code, lang)
+  newNoteBody.value = ''
+  newNoteCode.value = ''
+  newNoteLang.value = ''
+  newNoteOpen.value = false
+}
+
+function startEditNote(note: ProjectNote) {
+  editingNoteId.value = note.id
+  editNoteBody.value  = note.body
+  editNoteCode.value  = note.code ?? ''
+  editNoteLang.value  = note.language ?? ''
+}
+
+async function commitEditNote() {
+  if (editingNoteId.value === null) return
+  const body = editNoteBody.value.trim()
+  const code = editNoteCode.value.trim() || undefined
+  const lang = editNoteLang.value.trim() || undefined
+  await wb.updateNote(editingNoteId.value, body || '—', code, lang)
+  editingNoteId.value = null
+}
+
+function toggleCodeExpand(id: number) {
+  if (expandedCodeIds.value.has(id)) {
+    expandedCodeIds.value.delete(id)
+  } else {
+    expandedCodeIds.value.add(id)
+  }
+  expandedCodeIds.value = new Set(expandedCodeIds.value)
+}
 
 const filteredGroups = computed<AnnGroup[]>(() => {
   const q = sidebarSearch.value.trim().toLowerCase()
@@ -250,6 +420,19 @@ function annText(a?: AnnotationWithSource): string {
   return a.selectedText?.trim() || a.noteText?.trim() || '—'
 }
 
+function noteById(id: number): ProjectNote | undefined {
+  return wb.notes.value.find(n => n.id === id)
+}
+
+function relativeTime(unixSec: number): string {
+  const diff = Math.floor(Date.now() / 1000) - unixSec
+  if (diff < 60)    return 'just now'
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`
+  return new Date(unixSec * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 function autoResize(e: Event) {
   const el = e.target as HTMLTextAreaElement
   el.style.height = 'auto'
@@ -260,39 +443,18 @@ function autoResize(e: Event) {
 <template>
   <div class="wb" @click.self="closePicker">
 
-    <!-- ── Empty: no projects ───────────────────────────────────────────────── -->
-    <div v-if="!wb.loading.value && wb.projects.value.length === 0 && !newProjectOpen"
-         class="wb-empty">
+    <!-- ── Empty: no project selected ──────────────────────────────────────── -->
+    <div v-if="!wb.currentProject.value && !wb.loading.value" class="wb-empty">
       <div class="wb-empty-inner">
         <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor"
-             stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+             stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.35">
           <rect x="4" y="6" width="24" height="20" rx="2"/>
           <line x1="10" y1="13" x2="22" y2="13"/>
           <line x1="10" y1="18" x2="17" y2="18"/>
         </svg>
-        <p class="wb-empty-title">No workbench projects yet</p>
-        <p class="wb-empty-sub">A project groups your source set and rough outline for a paper.</p>
-        <button class="btn-primary" @click="newProjectOpen = true">New project</button>
-      </div>
-    </div>
-
-    <!-- ── New project input overlay ────────────────────────────────────────── -->
-    <div v-if="newProjectOpen" class="wb-empty">
-      <div class="wb-empty-inner">
-        <p class="wb-empty-title">Name your project</p>
-        <input
-          v-model="newProjectName"
-          class="new-project-input"
-          placeholder="e.g. Allergen Labelling Study"
-          maxlength="80"
-          autofocus
-          @keydown.enter="submitNewProject"
-          @keydown.escape="newProjectOpen = false"
-        />
-        <div class="new-project-actions">
-          <button class="btn-primary" @click="submitNewProject">Create</button>
-          <button class="btn-ghost" @click="newProjectOpen = false">Cancel</button>
-        </div>
+        <p class="wb-empty-title">No project open</p>
+        <p class="wb-empty-sub">Create or select a project to start your outline.</p>
+        <button class="btn-primary" @click="router.push('/projects')">← Go to Projects</button>
       </div>
     </div>
 
@@ -302,37 +464,8 @@ function autoResize(e: Event) {
       <!-- Header bar -->
       <div class="wb-header">
         <div class="wb-header-left">
-          <!-- Project switcher -->
-          <div class="project-select-wrap">
-            <select
-              class="project-select"
-              :value="wb.currentId.value"
-              @change="wb.selectProject(Number(($event.target as HTMLSelectElement).value))"
-            >
-              <option v-for="p in wb.projects.value" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
-            <svg class="select-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none"
-                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-              <path d="M2 4l3 3 3-3"/>
-            </svg>
-          </div>
-
-          <!-- Rename project -->
-          <template v-if="renamingProject">
-            <input
-              v-model="renameDraft"
-              class="rename-input"
-              @keydown.enter="commitRenameProject"
-              @keydown.escape="renamingProject = false"
-              @blur="commitRenameProject"
-            />
-          </template>
-          <button v-else class="icon-btn" title="Rename project" @click="startRenameProject">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor"
-                 stroke-width="1.5" stroke-linecap="round">
-              <path d="M8.5 1.5L10.5 3.5L4 10H2V8L8.5 1.5Z"/>
-            </svg>
-          </button>
+          <!-- Project name -->
+          <span class="project-name-label">{{ wb.currentProject.value?.name }}</span>
 
           <div class="header-sep"></div>
 
@@ -384,15 +517,23 @@ function autoResize(e: Event) {
         </div>
 
         <div class="wb-header-right">
-          <button class="btn-ghost btn-sm"
-                  @click="wb.deleteProject(wb.currentId.value!)"
-                  title="Delete project">
-            Delete project
+          <button
+            class="btn-ghost btn-sm"
+            :disabled="wb.sourceIds.value.length === 0"
+            :title="wb.sourceIds.value.length === 0 ? 'Add sources first' : 'Export sources as .bib file'"
+            @click="exportBib"
+          >
+            {{ exportStatus === 'ok' ? 'Saved ✓' : exportStatus === 'err' ? 'Error' : 'Export .bib' }}
           </button>
-          <button class="btn-ghost btn-sm" @click="newProjectOpen = true">
-            New project
+          <button
+            class="btn-ghost btn-sm"
+            :disabled="wb.sections.value.length === 0"
+            :title="wb.sections.value.length === 0 ? 'Add sections first' : 'Copy workbench as AI prompt'"
+            @click="copyForAi"
+          >
+            {{ copyStatus === 'ok' ? 'Copied ✓' : 'Copy for AI' }}
           </button>
-          <button class="btn-primary btn-sm" @click="router.push('/write')">
+          <button class="btn-primary btn-sm" @click="writeFromSections">
             → Write
           </button>
         </div>
@@ -450,11 +591,13 @@ function autoResize(e: Event) {
                 </div>
               </div>
 
-              <!-- Dropped annotations + {{ trigger -->
+              <!-- Dropped items + {{ trigger -->
               <div class="section-body">
+
+                <!-- Dropped annotations -->
                 <div
                   v-for="entry in sec.annotations"
-                  :key="entry.annotationId"
+                  :key="'ann-' + entry.annotationId"
                   class="dropped-ann"
                 >
                   <div class="dropped-stripe" :style="{ background: annById(entry.annotationId)?.color }"></div>
@@ -482,12 +625,44 @@ function autoResize(e: Event) {
                   </button>
                 </div>
 
-                <!-- {{ annotation trigger -->
+                <!-- Dropped notes -->
+                <div
+                  v-for="ne in sec.noteEntries"
+                  :key="'note-' + ne.noteId"
+                  class="dropped-note-block"
+                >
+                  <template v-if="noteById(ne.noteId)">
+                    <div class="dropped-note-stripe"></div>
+                    <div class="dropped-body">
+                      <div class="dropped-note-ts">{{ relativeTime(noteById(ne.noteId)!.createdAt) }}</div>
+                      <div class="dropped-text">{{ noteById(ne.noteId)!.body }}</div>
+                      <template v-if="noteById(ne.noteId)!.code">
+                        <button class="code-toggle" @click="toggleCodeExpand(ne.noteId)">
+                          <span class="code-lang">{{ noteById(ne.noteId)!.language || 'code' }}</span>
+                          <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                            <path v-if="expandedCodeIds.has(ne.noteId)" d="M1 5l3-3 3 3"/>
+                            <path v-else d="M1 3l3 3 3-3"/>
+                          </svg>
+                        </button>
+                        <pre v-if="expandedCodeIds.has(ne.noteId)" class="code-block">{{ noteById(ne.noteId)!.code }}</pre>
+                      </template>
+                    </div>
+                    <button class="dropped-remove" title="Remove"
+                            @click="wb.liftNote(sec.id, ne.noteId)">
+                      <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor"
+                           stroke-width="1.5" stroke-linecap="round">
+                        <line x1="1" y1="1" x2="8" y2="8"/><line x1="8" y1="1" x2="1" y2="8"/>
+                      </svg>
+                    </button>
+                  </template>
+                </div>
+
+                <!-- {{ annotation/note trigger -->
                 <div class="section-trigger-wrap">
                   <input
                     :value="sectionQuery[sec.id] ?? ''"
                     class="section-trigger-input"
-                    :placeholder="sec.annotations.length === 0 ? 'Type {{ to add an annotation…' : '{{'"
+                    :placeholder="(sec.annotations.length + sec.noteEntries.length) === 0 ? 'Type {{ to add an annotation or note…' : '{{'"
                     @input="onQueryInput($event, sec.id)"
                     @focus="onQueryFocus(sec.id)"
                     @blur="onQueryBlur"
@@ -501,17 +676,26 @@ function autoResize(e: Event) {
                     class="sug-list"
                   >
                     <div
-                      v-for="(a, i) in suggestions"
-                      :key="a.id"
+                      v-for="(sug, i) in suggestions"
+                      :key="sug.kind + '-' + sug.data.id"
                       class="sug-row"
                       :class="{ 'sug-focused': i === focusedIdx }"
-                      @mousedown.prevent="selectSuggestion(sec.id, a.id)"
+                      @mousedown.prevent="selectSuggestion(sec.id, sug)"
                     >
-                      <div class="sug-stripe" :style="{ background: a.color }"></div>
-                      <div class="sug-body">
-                        <div class="sug-text">{{ annText(a) }}</div>
-                        <div class="sug-meta">{{ shortAuthors(a.itemAuthors) }}{{ a.itemYear ? ' ' + a.itemYear : '' }} · p.{{ a.page }}</div>
-                      </div>
+                      <template v-if="sug.kind === 'annotation'">
+                        <div class="sug-stripe" :style="{ background: sug.data.color }"></div>
+                        <div class="sug-body">
+                          <div class="sug-text">{{ annText(sug.data) }}</div>
+                          <div class="sug-meta">{{ shortAuthors(sug.data.itemAuthors) }}{{ sug.data.itemYear ? ' ' + sug.data.itemYear : '' }} · p.{{ sug.data.page }}</div>
+                        </div>
+                      </template>
+                      <template v-else>
+                        <div class="sug-stripe sug-stripe--note"></div>
+                        <div class="sug-body">
+                          <div class="sug-text">{{ sug.data.body }}</div>
+                          <div class="sug-meta">My note · {{ relativeTime(sug.data.createdAt) }}{{ sug.data.code ? ' · has code' : '' }}</div>
+                        </div>
+                      </template>
                     </div>
                   </div>
                 </div>
@@ -540,9 +724,77 @@ function autoResize(e: Event) {
             </button>
 
           </div>
+
+          <!-- ── Notes panel ──────────────────────────────────────────────── -->
+          <div class="notes-panel">
+            <div class="notes-panel-head">
+              <span class="notes-panel-label">Notes</span>
+              <span class="notes-panel-count">{{ wb.notes.value.length }}</span>
+            </div>
+
+            <!-- Existing notes -->
+            <div class="notes-panel-list">
+              <div
+                v-for="note in wb.notes.value"
+                :key="note.id"
+                class="note-inline-card"
+                :class="{ 'is-dropped': droppedNoteIds.has(note.id) }"
+              >
+                <div class="note-inline-ts">{{ relativeTime(note.createdAt) }}</div>
+                <div class="note-inline-body">{{ note.body }}</div>
+                <span v-if="note.code" class="note-inline-code-badge">{{ note.language || 'code' }}</span>
+                <div class="note-inline-actions">
+                  <button class="icon-btn" title="Edit" @click="startEditNote(note)">
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round">
+                      <path d="M7 1L9 3L3.5 8.5H1.5V6.5L7 1Z"/>
+                    </svg>
+                  </button>
+                  <button class="icon-btn icon-btn--del" title="Delete" @click="wb.deleteNote(note.id)">
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round">
+                      <line x1="1" y1="1" x2="9" y2="9"/><line x1="9" y1="1" x2="1" y2="9"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <div v-if="wb.notes.value.length === 0 && !quickNoteOpen" class="notes-panel-empty">
+                No notes yet
+              </div>
+            </div>
+
+            <!-- Quick-add note -->
+            <div v-if="quickNoteOpen" class="quick-note-form">
+              <textarea
+                ref="quickNoteInput"
+                v-model="quickNoteBody"
+                class="quick-note-input"
+                placeholder="Observation, synthesis, open question…"
+                rows="3"
+                @keydown.ctrl.enter.prevent="submitQuickNote"
+                @keydown.meta.enter.prevent="submitQuickNote"
+                @keydown.escape="quickNoteOpen = false"
+              ></textarea>
+              <div class="quick-note-actions">
+                <button class="btn-primary btn-sm" @click="submitQuickNote">Add note</button>
+                <button class="btn-ghost btn-sm" @click="quickNoteOpen = false">Cancel</button>
+                <span class="quick-note-hint">Ctrl+↵ to save</span>
+              </div>
+            </div>
+            <button v-else class="add-note-btn" @click="openQuickNote">
+              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor"
+                   stroke-width="1.5" stroke-linecap="round">
+                <line x1="5.5" y1="1" x2="5.5" y2="10"/>
+                <line x1="1" y1="5.5" x2="10" y2="5.5"/>
+              </svg>
+              Add note
+            </button>
+          </div>
+
         </div>
 
-        <!-- ── Right: annotation sidebar ─────────────────────────────────── -->
+        <!-- ── Right: sidebar ───────────────────────────────────────────── -->
         <div class="wb-sidebar" :class="{ collapsed: sidebarCollapsed }">
           <div class="sidebar-header">
             <button class="sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed" title="Toggle sidebar">
@@ -554,50 +806,143 @@ function autoResize(e: Event) {
               </svg>
             </button>
             <template v-if="!sidebarCollapsed">
-              <span class="sidebar-title">Annotations</span>
-              <span class="sidebar-count">{{ sourceAnnotations.length }}</span>
+              <div class="sidebar-tabs">
+                <button class="sidebar-tab" :class="{ active: sidebarTab === 'literature' }"
+                        @click="sidebarTab = 'literature'">Literature</button>
+                <button class="sidebar-tab" :class="{ active: sidebarTab === 'notes' }"
+                        @click="sidebarTab = 'notes'">My Notes</button>
+              </div>
+              <span class="sidebar-count">
+                {{ sidebarTab === 'literature' ? sourceAnnotations.length : wb.notes.value.length }}
+              </span>
             </template>
           </div>
 
           <template v-if="!sidebarCollapsed">
-            <div class="sidebar-search-wrap">
-              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor"
-                   stroke-width="1.5" stroke-linecap="round">
-                <circle cx="4.5" cy="4.5" r="3.5"/>
-                <line x1="7.5" y1="7.5" x2="10.5" y2="10.5"/>
-              </svg>
-              <input v-model="sidebarSearch" class="sidebar-search" placeholder="Filter…" />
-            </div>
 
-            <div class="sidebar-body">
-              <div v-if="wb.sourceIds.value.length === 0" class="sidebar-empty">
-                Add sources above to see annotations here
+            <!-- Literature tab -->
+            <template v-if="sidebarTab === 'literature'">
+              <div class="sidebar-search-wrap">
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor"
+                     stroke-width="1.5" stroke-linecap="round">
+                  <circle cx="4.5" cy="4.5" r="3.5"/>
+                  <line x1="7.5" y1="7.5" x2="10.5" y2="10.5"/>
+                </svg>
+                <input v-model="sidebarSearch" class="sidebar-search" placeholder="Filter…" />
               </div>
-              <div v-else-if="sourceAnnotations.length === 0" class="sidebar-empty">
-                No annotations from these sources yet
-              </div>
-              <template v-else>
-                <div v-for="group in filteredGroups" :key="group.itemId" class="sidebar-group">
-                  <div class="sidebar-group-header">
-                    <span class="sidebar-group-title">{{ shortAuthors(group.anns[0].itemAuthors) }}{{ group.anns[0].itemYear ? ' ' + group.anns[0].itemYear : '' }}</span>
-                    <span class="sidebar-group-count">{{ group.anns.length }}</span>
-                  </div>
-                  <div
-                    v-for="a in group.anns"
-                    :key="a.id"
-                    class="sidebar-ann"
-                    :class="{ 'is-dropped': droppedIds.has(a.id) }"
-                  >
-                    <div class="sidebar-stripe" :style="{ background: a.color }"></div>
-                    <div class="sidebar-ann-body">
-                      <div class="sidebar-ann-text">{{ annText(a) }}</div>
-                      <div class="sidebar-ann-meta">p.&nbsp;{{ a.page }}</div>
-                    </div>
-                    <div v-if="droppedIds.has(a.id)" class="dropped-badge" title="Already in outline">✓</div>
-                  </div>
+              <div class="sidebar-body">
+                <div v-if="wb.sourceIds.value.length === 0" class="sidebar-empty">
+                  Add sources above to see annotations here
                 </div>
-              </template>
-            </div>
+                <div v-else-if="sourceAnnotations.length === 0" class="sidebar-empty">
+                  No annotations from these sources yet
+                </div>
+                <template v-else>
+                  <div v-for="group in filteredGroups" :key="group.itemId" class="sidebar-group">
+                    <div class="sidebar-group-header">
+                      <span class="sidebar-group-title">{{ shortAuthors(group.anns[0].itemAuthors) }}{{ group.anns[0].itemYear ? ' ' + group.anns[0].itemYear : '' }}</span>
+                      <span class="sidebar-group-count">{{ group.anns.length }}</span>
+                    </div>
+                    <div
+                      v-for="a in group.anns"
+                      :key="a.id"
+                      class="sidebar-ann"
+                      :class="{ 'is-dropped': droppedIds.has(a.id) }"
+                    >
+                      <div class="sidebar-stripe" :style="{ background: a.color }"></div>
+                      <div class="sidebar-ann-body">
+                        <div class="sidebar-ann-text">{{ annText(a) }}</div>
+                        <div class="sidebar-ann-meta">p.&nbsp;{{ a.page }}</div>
+                      </div>
+                      <div v-if="droppedIds.has(a.id)" class="dropped-badge" title="Already in outline">✓</div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- My Notes tab -->
+            <template v-else>
+              <div class="sidebar-notes-toolbar">
+                <button v-if="!newNoteOpen" class="new-note-btn" @click="newNoteOpen = true">
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"
+                       stroke-width="1.6" stroke-linecap="round">
+                    <line x1="5" y1="1" x2="5" y2="9"/>
+                    <line x1="1" y1="5" x2="9" y2="5"/>
+                  </svg>
+                  New note
+                </button>
+              </div>
+
+              <!-- New note form -->
+              <div v-if="newNoteOpen" class="note-form">
+                <textarea
+                  v-model="newNoteBody"
+                  class="note-form-body"
+                  placeholder="Analysis summary, observation, finding…"
+                  rows="3"
+                  autofocus
+                  @keydown.escape="newNoteOpen = false"
+                ></textarea>
+                <div class="note-form-code-row">
+                  <input v-model="newNoteLang" class="note-form-lang" placeholder="lang (e.g. python)" maxlength="20" />
+                  <textarea v-if="newNoteLang" v-model="newNoteCode" class="note-form-code" placeholder="code snippet…" rows="3"></textarea>
+                </div>
+                <div class="note-form-actions">
+                  <button class="btn-primary btn-sm" @click="submitNewNote">Add note</button>
+                  <button class="btn-ghost btn-sm" @click="newNoteOpen = false">Cancel</button>
+                </div>
+              </div>
+
+              <div class="sidebar-body">
+                <div v-if="wb.notes.value.length === 0 && !newNoteOpen" class="sidebar-empty">
+                  No notes yet. Click "+ New note" to add one.
+                </div>
+                <template v-else>
+                  <div
+                    v-for="note in wb.notes.value"
+                    :key="note.id"
+                    class="sidebar-note"
+                    :class="{ 'is-dropped': droppedNoteIds.has(note.id), 'is-editing': editingNoteId === note.id }"
+                  >
+                    <template v-if="editingNoteId === note.id">
+                      <textarea v-model="editNoteBody" class="note-edit-body" rows="3" autofocus></textarea>
+                      <div class="note-form-code-row">
+                        <input v-model="editNoteLang" class="note-form-lang" placeholder="lang" maxlength="20" />
+                        <textarea v-if="editNoteLang" v-model="editNoteCode" class="note-form-code" rows="3" placeholder="code…"></textarea>
+                      </div>
+                      <div class="note-form-actions">
+                        <button class="btn-primary btn-sm" @click="commitEditNote">Save</button>
+                        <button class="btn-ghost btn-sm" @click="editingNoteId = null">Cancel</button>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <div class="sidebar-note-meta">{{ relativeTime(note.createdAt) }}</div>
+                      <div class="sidebar-note-body" @dblclick="startEditNote(note)">{{ note.body }}</div>
+                      <span v-if="note.code" class="sidebar-note-code-badge">
+                        {{ note.language || 'code' }}
+                      </span>
+                      <div class="sidebar-note-actions">
+                        <button class="icon-btn" title="Edit" @click="startEditNote(note)">
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"
+                               stroke-width="1.5" stroke-linecap="round">
+                            <path d="M7 1L9 3L3.5 8.5H1.5V6.5L7 1Z"/>
+                          </svg>
+                        </button>
+                        <button class="icon-btn icon-btn--del" title="Delete" @click="wb.deleteNote(note.id)">
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"
+                               stroke-width="1.5" stroke-linecap="round">
+                            <line x1="1" y1="1" x2="9" y2="9"/><line x1="9" y1="1" x2="1" y2="9"/>
+                          </svg>
+                        </button>
+                      </div>
+                      <div v-if="droppedNoteIds.has(note.id)" class="dropped-badge">✓</div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
           </template>
         </div>
 
@@ -754,47 +1099,16 @@ function autoResize(e: Event) {
   flex-shrink: 0;
 }
 
-/* Project select */
-.project-select-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.project-select {
-  appearance: none;
-  background: none;
-  border: none;
+/* Project name label */
+.project-name-label {
   font-size: 13px;
   font-weight: 600;
-  font-family: var(--font-ui);
   color: var(--text);
-  cursor: pointer;
-  outline: none;
-  padding-right: 18px;
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.select-chevron {
-  position: absolute;
-  right: 2px;
-  color: var(--text-tertiary);
-  pointer-events: none;
-}
-
-.rename-input {
-  font-size: 13px;
-  font-weight: 600;
-  font-family: var(--font-ui);
-  background: var(--surface-solid);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  padding: 2px 7px;
-  outline: none;
-  color: var(--text);
-  width: 180px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Sources row */
@@ -1385,5 +1699,443 @@ function autoResize(e: Event) {
   flex-shrink: 0;
   align-self: center;
   padding: 0 4px;
+}
+
+/* ── Sidebar tabs ─────────────────────────────────────────────────────────── */
+
+.sidebar-tabs {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+}
+
+.sidebar-tab {
+  background: none;
+  border: none;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-ui);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--t), color var(--t);
+}
+
+.sidebar-tab.active {
+  color: var(--text);
+  background: var(--bg-chrome-active);
+}
+
+.sidebar-tab:hover:not(.active) {
+  color: var(--text-secondary);
+  background: var(--bg-chrome-active);
+}
+
+/* ── My Notes toolbar ────────────────────────────────────────────────────── */
+
+.sidebar-notes-toolbar {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.new-note-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 1px dashed var(--border-medium);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-family: var(--font-ui);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: border-color var(--t), color var(--t), background var(--t);
+  width: 100%;
+}
+
+.new-note-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ── Note form ───────────────────────────────────────────────────────────── */
+
+.note-form {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.note-form-body {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--surface-solid);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  outline: none;
+  resize: none;
+  line-height: 1.5;
+}
+
+.note-form-body:focus { border-color: var(--accent); }
+
+.note-form-code-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.note-form-lang {
+  padding: 4px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-ui);
+  color: var(--text-secondary);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  width: 120px;
+}
+
+.note-form-lang:focus { border-color: var(--accent); }
+
+.note-form-code {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: 'Menlo', 'Consolas', monospace;
+  color: var(--text);
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  resize: none;
+  line-height: 1.5;
+}
+
+.note-form-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ── Sidebar note rows ───────────────────────────────────────────────────── */
+
+.sidebar-note {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  position: relative;
+  transition: background var(--t);
+}
+
+.sidebar-note:hover { background: var(--bg-chrome-active); }
+.sidebar-note.is-dropped { opacity: 0.5; }
+
+.sidebar-note-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+
+.sidebar-note-body {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: text;
+}
+
+.sidebar-note-code-badge {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-family: 'Menlo', 'Consolas', monospace;
+  color: var(--text-tertiary);
+  align-self: flex-start;
+}
+
+.sidebar-note-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--t);
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+.sidebar-note:hover .sidebar-note-actions { opacity: 1; }
+
+.note-edit-body {
+  width: 100%;
+  padding: 5px 7px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--surface-solid);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  outline: none;
+  resize: none;
+  line-height: 1.5;
+}
+
+/* ── Dropped note block (in section cards) ───────────────────────────────── */
+
+.dropped-note-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  transition: background var(--t);
+}
+
+.dropped-note-block:hover { background: var(--bg-chrome); }
+
+.dropped-note-stripe {
+  width: 3px;
+  align-self: stretch;
+  flex-shrink: 0;
+  background: var(--text-tertiary);
+  opacity: 0.35;
+}
+
+.dropped-note-ts {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-bottom: 2px;
+}
+
+.sug-stripe--note {
+  width: 3px;
+  align-self: stretch;
+  flex-shrink: 0;
+  background: var(--text-tertiary);
+  opacity: 0.35;
+  margin-right: 9px;
+}
+
+/* ── Notes panel (below outline) ─────────────────────────────────────────── */
+
+.notes-panel {
+  max-width: 680px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-medium);
+}
+
+.notes-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.notes-panel-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+.notes-panel-count {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  background: var(--bg-chrome-active);
+  border-radius: 9px;
+  padding: 1px 6px;
+}
+
+.notes-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.notes-panel-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: 4px 0 8px;
+}
+
+.note-inline-card {
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: border-color var(--t), box-shadow var(--t);
+}
+
+.note-inline-card:hover {
+  border-color: var(--border-medium);
+  box-shadow: var(--shadow-xs);
+}
+
+.note-inline-card.is-dropped {
+  opacity: 0.5;
+}
+
+.note-inline-ts {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.note-inline-body {
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.note-inline-code-badge {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  align-self: flex-start;
+}
+
+.note-inline-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--t);
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+.note-inline-card:hover .note-inline-actions {
+  opacity: 1;
+}
+
+.quick-note-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface-solid);
+  border: 1.5px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 4px;
+}
+
+.quick-note-input {
+  width: 100%;
+  padding: 0;
+  font-size: 12.5px;
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  line-height: 1.5;
+}
+
+.quick-note-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quick-note-hint {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+}
+
+.add-note-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px dashed var(--border-medium);
+  border-radius: var(--radius);
+  padding: 7px 14px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: border-color var(--t), color var(--t), background var(--t);
+  width: 100%;
+}
+
+.add-note-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Code toggle + block */
+.code-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 10.5px;
+  font-family: var(--font-ui);
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-top: 4px;
+  transition: background var(--t);
+}
+
+.code-toggle:hover { background: var(--bg-chrome-active); }
+
+.code-lang {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.code-block {
+  margin-top: 4px;
+  padding: 7px 9px;
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-family: 'Menlo', 'Consolas', monospace;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text);
 }
 </style>

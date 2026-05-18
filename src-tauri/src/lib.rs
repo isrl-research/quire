@@ -9,21 +9,25 @@ pub use library::{
     // tags
     create_tag, delete_tag, get_tags, set_item_tags, update_tag_color,
     // import / export
-    import_bib_file, export_bib_file,
+    import_bib_file, export_bib_file, get_bib_text_for_items,
     // metadata fetch
     fetch_doi_metadata, fetch_arxiv_metadata, fetch_isbn_metadata,
     // attachments
-    pick_and_attach_file, get_item_attachments, read_attachment_bytes,
-    open_attachment_external, remove_attachment,
+    pick_and_attach_file, get_item_attachments, get_all_attachments_with_item,
+    read_attachment_bytes, open_attachment_external, remove_attachment,
     // annotations
     create_annotation, get_annotations_for_attachment, get_all_annotations,
     delete_annotation, update_annotation_note,
     // workbench
     get_projects, create_project, delete_project, rename_project,
+    update_project_meta, set_project_doc_path,
     get_project_source_ids, add_project_source, remove_project_source,
     get_project_sections, create_project_section, update_project_section,
     delete_project_section, reorder_project_sections,
     add_annotation_to_section, remove_annotation_from_section, update_section_annotation_note,
+    // project notes
+    get_project_notes, create_project_note, update_project_note, delete_project_note,
+    add_note_to_section, remove_note_from_section,
 };
 
 use serde::{Deserialize, Serialize};
@@ -289,6 +293,35 @@ async fn save_document_as(app: tauri::AppHandle, content: String) -> Result<Stri
 
     fs::write(&path_str, content).map_err(|e| e.to_string())?;
     Ok(path_str)
+}
+
+#[tauri::command]
+async fn export_project_bib_dialog(
+    app: tauri::AppHandle,
+    item_ids: Vec<i64>,
+    project_name: String,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let default_name = format!("{}.bib", project_name.replace(['/', '\\', ':'], "_"));
+    let path = match app
+        .dialog()
+        .file()
+        .add_filter("BibTeX", &["bib"])
+        .set_file_name(&default_name)
+        .blocking_save_file()
+    {
+        Some(p) => p,
+        None => return Ok(false), // user cancelled
+    };
+
+    let path_str = path
+        .into_path()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    export_bib_file(item_ids, path_str).map(|_| true)
 }
 
 #[tauri::command]
@@ -681,6 +714,8 @@ pub fn run() {
             // Library — import / export
             import_bib_file,
             export_bib_file,
+            get_bib_text_for_items,
+            export_project_bib_dialog,
             // Library — metadata fetch
             fetch_doi_metadata,
             fetch_arxiv_metadata,
@@ -688,6 +723,7 @@ pub fn run() {
             // Library — attachments
             pick_and_attach_file,
             get_item_attachments,
+            get_all_attachments_with_item,
             read_attachment_bytes,
             open_attachment_external,
             remove_attachment,
@@ -699,10 +735,14 @@ pub fn run() {
             update_annotation_note,
             // Workbench
             get_projects, create_project, delete_project, rename_project,
+            update_project_meta, set_project_doc_path,
             get_project_source_ids, add_project_source, remove_project_source,
             get_project_sections, create_project_section, update_project_section,
             delete_project_section, reorder_project_sections,
             add_annotation_to_section, remove_annotation_from_section, update_section_annotation_note,
+            // Project notes
+            get_project_notes, create_project_note, update_project_note, delete_project_note,
+            add_note_to_section, remove_note_from_section,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
